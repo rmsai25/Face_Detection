@@ -1,0 +1,9 @@
+# Python bytecode files
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment directory
+.my_venv312/
+venv/
+env/

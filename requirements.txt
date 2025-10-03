@@ -1,0 +1,26 @@
+# Core dependencies
+opencv-python
+
+numpy<2
+#pip install numpy==1.26.4
+
+# Database
+SQLAlchemy
+psycopg2-binary
+
+python-dotenv
+
+timm
+tf-keras
+#keras-facenet
+
+facenet-pytorch
+retina-face
+
+
+#torch torchvision torchaudio
+#use this version , pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+#For GPU (CUDA): pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 (The CUDA version may vary.)
+#For CPU only: pip install torch torchvision torchaudio
+#pip install opencv-python-headless
+#pip install timm
