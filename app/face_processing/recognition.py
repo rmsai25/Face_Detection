@@ -749,4 +749,3 @@ class FaceRecognizer:
         self.known_face_ids.clear()
         logger.info("Cleared all known face data from memory")
 
-

@@ -5,12 +5,19 @@ import argparse
 import logging
 from dotenv import load_dotenv
 
-from database.db_handler import DatabaseHandler
+'''from database.db_handler import DatabaseHandler
 from face_processing.capture import VideoCapture
 from face_processing.encoding import FaceEncoder
 from face_processing.recognition import FaceRecognizer
 from utils.logger import setup_logger
-from config import config
+from config import config'''
+
+from app.database.db_handler import DatabaseHandler
+from app.face_processing.capture import VideoCapture
+from app.face_processing.encoding import FaceEncoder
+from app.face_processing.recognition import FaceRecognizer
+from app.utils.logger import setup_logger
+from app.config import config
 
 # Suppress TensorFlow logging
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'

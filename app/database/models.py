@@ -10,35 +10,67 @@ from typing import Optional, Any
 
 logger = logging.getLogger(__name__)
 
-# Custom type for storing numpy arrays
+# Custom type for storing numpy arrays with consistent 512D output
 class NumpyArray(types.TypeDecorator):
-    """Custom type for storing numpy arrays in SQLite/PostgreSQL"""
+    """Custom type for storing numpy arrays with consistent 512D output"""
     impl = types.LargeBinary
     
-    def process_bind_param(self, value, dialect) -> Optional[bytes]:
-        if value is not None:
-            try:
-                # Convert numpy array or list to bytes
-                if isinstance(value, np.ndarray):
-                    return value.astype(np.float32).tobytes()
-                elif isinstance(value, (list, tuple)):
-                    return np.array(value, dtype=np.float32).tobytes()
-                else:
-                    raise ValueError(f"Unsupported type for NumpyArray: {type(value)}")
-            except Exception as e:
-                logger.error(f"Error converting to bytes: {e}")
-                raise
-        return None
+    def __init__(self, *args, **kwargs):
+        self.target_dim = 512  # Force 512 dimensions
+        super().__init__()
+        
+    def process_bind_param(self, value, dialect):
+        """Convert numpy array to bytes with consistent 512D output"""
+        if value is None:
+            return None
+            
+        try:
+            # Convert input to numpy array if it isn't already
+            if not isinstance(value, np.ndarray):
+                value = np.array(value, dtype=np.float32)
+                
+            # Ensure we have a 1D array
+            value = value.reshape(-1)
+            
+            # Handle dimension conversion
+            if len(value) == self.target_dim:
+                # Already correct dimension
+                return value.astype(np.float32).tobytes()
+            elif len(value) > self.target_dim:
+                # If larger than target, take first 512 dimensions
+                logger.warning(f"Truncating embedding from {len(value)}D to {self.target_dim}D")
+                return value[:self.target_dim].astype(np.float32).tobytes()
+            else:
+                # If smaller, pad with zeros
+                logger.warning(f"Padding embedding from {len(value)}D to {self.target_dim}D")
+                padded = np.zeros(self.target_dim, dtype=np.float32)
+                padded[:len(value)] = value
+                return padded.tobytes()
+                
+        except Exception as e:
+            logger.error(f"Error processing numpy array: {e}")
+            raise ValueError(f"Could not process array of shape {getattr(value, 'shape', 'unknown')}") from e
     
-    def process_result_value(self, value: Optional[bytes], dialect) -> Optional[np.ndarray]:
-        if value is not None:
-            try:
-                # Convert bytes back to numpy array
-                return np.frombuffer(value, dtype=np.float32)
-            except Exception as e:
-                logger.error(f"Error converting bytes to numpy array: {e}")
-                return None
-        return None
+    def process_result_value(self, value, dialect):
+        """Convert bytes back to numpy array, ensuring 512D"""
+        if value is None:
+            return None
+        try:
+            # Convert bytes to numpy array and ensure it's float32
+            arr = np.frombuffer(value, dtype=np.float32)
+            # Ensure it's exactly 512D
+            if len(arr) != self.target_dim:
+                logger.warning(f"Loaded embedding has {len(arr)} dimensions, expected {self.target_dim}")
+                if len(arr) > self.target_dim:
+                    arr = arr[:self.target_dim]
+                else:
+                    padded = np.zeros(self.target_dim, dtype=np.float32)
+                    padded[:len(arr)] = arr
+                    arr = padded
+            return arr
+        except Exception as e:
+            logger.error(f"Error converting bytes to numpy array: {e}")
+            return None
 
 # Create base class for our models
 Base = declarative_base()
@@ -49,7 +81,7 @@ class User(Base):
     
     id = Column(Integer, primary_key=True)
     name = Column(String(100), unique=True, nullable=False, index=True)
-    face_encoding = Column(NumpyArray, nullable=False)
+    face_encoding = Column(NumpyArray(), nullable=False)  # This will ensure 512D
     image_data = Column(types.LargeBinary, nullable=False)
     image_format = Column(String(10), default='jpg')
     date_created = Column(DateTime, default=datetime.utcnow, index=True)
@@ -87,7 +119,7 @@ class AccessLog(Base):
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
     confidence = Column(Float)
     access_granted = Column(Boolean, default=False)
-    face_encoding = Column(NumpyArray, nullable=True)
+    face_encoding = Column(NumpyArray(), nullable=True)  # This will ensure 512D
     detection_metadata = Column(Text, nullable=True)  # JSON string for additional metadata
     
     # Relationship with user
@@ -154,8 +186,3 @@ def init_db(database_url: str, echo: bool = False, **kwargs) -> sessionmaker:
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise
-
-
-
-
-

@@ -1,4 +1,3 @@
-
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from .models import User, AccessLog, init_db as init_models
@@ -15,6 +14,10 @@ import torch
 from facenet_pytorch import InceptionResnetV1
 
 logger = logging.getLogger(__name__)
+
+def cosine_similarity(a, b):
+    """Calculate cosine similarity between two vectors"""
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 class FaceNetRetinaFaceEmbedder:
     """FaceNet (facenet-pytorch) with RetinaFace for face detection and embedding generation"""
@@ -62,7 +65,7 @@ class FaceNetRetinaFaceEmbedder:
             return []
 
     def extract_embedding(self, image: np.ndarray, face_bbox: List[int] = None) -> Optional[np.ndarray]:
-        """Extract face embedding using FaceNet"""
+        """Extract face embedding using FaceNet and ensure 512D output"""
         try:
             if face_bbox is not None:
                 x1, y1, x2, y2 = face_bbox
@@ -87,11 +90,22 @@ class FaceNetRetinaFaceEmbedder:
             with torch.no_grad():
                 embedding = self.face_net(face_tensor).cpu().numpy()[0]
 
+            # Ensure 512D
+            if len(embedding) != 512:
+                logger.warning(f"Extracted embedding has {len(embedding)} dimensions, adjusting to 512D")
+                if len(embedding) > 512:
+                    embedding = embedding[:512]
+                else:
+                    padded = np.zeros(512, dtype=np.float32)
+                    padded[:len(embedding)] = embedding
+                    embedding = padded
+
             # Normalize embedding
             embedding = embedding / np.linalg.norm(embedding)
             return embedding.astype(np.float32)
+            
         except Exception as e:
-            logger.error(f"Error extracting FaceNet embedding: {e}")
+            logger.error(f"Error extracting face embedding: {e}")
             return None
 
     def process_image(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], List[Dict[str, Any]]]:
@@ -119,6 +133,16 @@ class FaceNetRetinaFaceEmbedder:
 
             with torch.no_grad():
                 embedding = self.face_net(face_tensor).cpu().numpy()[0]
+
+            # Ensure 512D
+            if len(embedding) != 512:
+                logger.warning(f"Extracted embedding has {len(embedding)} dimensions, adjusting to 512D")
+                if len(embedding) > 512:
+                    embedding = embedding[:512]
+                else:
+                    padded = np.zeros(512, dtype=np.float32)
+                    padded[:len(embedding)] = embedding
+                    embedding = padded
 
             # Normalize embedding
             embedding = embedding / np.linalg.norm(embedding)
@@ -166,13 +190,18 @@ class DatabaseHandler:
             logger.error(f"Error converting image data: {e}")
             return None
 
-    def add_user(self, name: str, image_data: bytes, is_face_crop: bool = False) -> Dict[str, Any]:
+    def add_user(self, name: str, image_data: bytes = None, image_path: str = None, is_face_crop: bool = False) -> Dict[str, Any]:
         """Add a new user with face encoding"""
         session = self.Session()
         try:
             # Validate input
             if not name or not name.strip():
                 raise ValueError("Name cannot be empty")
+            
+            # Load image data from either bytes or file path
+            if image_data is None and image_path is not None:
+                with open(image_path, 'rb') as f:
+                    image_data = f.read()
             
             if not image_data or len(image_data) == 0:
                 raise ValueError("Image data cannot be empty")
@@ -298,57 +327,53 @@ class DatabaseHandler:
             session.close()
 
     def find_similar_face(self, image_data: bytes, threshold: float = 0.7) -> Optional[Dict[str, Any]]:
-        """Find similar face in database"""
+        """Find similar face in database with dimension validation"""
         session = self.Session()
         try:
             image = self._bytes_to_image(image_data)
             if image is None:
                 return None
-                
-            input_embedding, faces = self.embedder.process_image(image)
-            if input_embedding is None:
+
+            # Extract face and embedding
+            embedding, faces = self.embedder.process_image(image)
+            if embedding is None or not faces:
                 return None
 
-            users = session.query(User).filter(User.face_encoding.isnot(None)).all()
-            best_match, best_similarity = None, -1
-            
-            # Normalize input embedding
-            input_embedding = np.array(input_embedding, dtype=np.float32).flatten()
-            input_norm = np.linalg.norm(input_embedding)
-            if input_norm == 0:
+            # Get all users with their encodings
+            users = session.query(User).all()
+            if not users:
                 return None
-            input_embedding_norm = input_embedding / input_norm
+
+            best_match = None
+            best_similarity = -1
 
             for user in users:
+                if user.face_encoding is None:
+                    continue
+
                 try:
-                    stored_encoding = np.array(user.face_encoding, dtype=np.float32).flatten()
-                    if stored_encoding.size == 0:
-                        continue
-                        
-                    # Normalize stored encoding
-                    stored_norm = np.linalg.norm(stored_encoding)
-                    if stored_norm == 0:
-                        continue
-                    stored_encoding_norm = stored_encoding / stored_norm
+                    # Convert stored encoding to numpy array
+                    stored_encoding = np.array(user.face_encoding, dtype=np.float32)
                     
                     # Calculate cosine similarity
-                    similarity = float(np.dot(input_embedding_norm, stored_encoding_norm))
+                    similarity = cosine_similarity(embedding, stored_encoding)
                     
                     if similarity > best_similarity and similarity >= threshold:
                         best_similarity = similarity
                         best_match = {
                             'id': user.id,
                             'name': user.name,
-                            'similarity': similarity,
-                            'distance': 1.0 - similarity,
+                            'similarity': float(similarity),
+                            'distance': 1.0 - float(similarity),
                             'faces_detected': len(faces),
                             'primary_face_confidence': faces[0]['confidence'] if faces else 0
                         }
                 except Exception as e:
-                    logger.error(f"Error processing user {user.id} ({user.name}): {e}")
+                    logger.warning(f"Error comparing with user {user.id}: {e}")
                     continue
-                    
+
             return best_match
+
         except Exception as e:
             logger.error(f"Error finding similar face: {e}")
             return None
@@ -389,7 +414,7 @@ class DatabaseHandler:
         finally:
             session.close()
 
-    def log_access_attempt(self, user_id: int, confidence: float, access_granted: bool) -> bool:
+    def log_access_attempt(self, user_id: int, confidence: float, access_granted: bool, image_path: str = None) -> bool:
         """Log access attempt to database"""
         session = self.Session()
         try:
@@ -436,25 +461,6 @@ class DatabaseHandler:
             return []
         finally:
             session.close()
-            
-    '''def log_access_attempt_batch(self, access_data_list: List[Dict]) -> bool:
-        """Batch process access logs to reduce database overhead"""
-        try:
-            with self.Session() as session:
-                for data in access_data_list:
-                    access_log = AccessLog(
-                        user_id=data.get('user_id'),
-                        name=data.get('name', 'Unknown'),
-                        access_granted=data.get('access_granted', False),
-                        confidence=data.get('confidence', 0.0),
-                        detection_metadata=data.get('detection_metadata')
-                    )
-                    session.add(access_log)
-                session.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error batch logging access attempts: {e}")
-            return False  '''      
 
     def delete_user(self, user_id: int) -> Dict[str, Any]:
         """Delete user from database"""
@@ -537,19 +543,3 @@ if __name__ == "__main__":
         
     db = DatabaseHandler(db_url)
     print("Database handler with facenet-pytorch + RetinaFace initialized successfully")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
