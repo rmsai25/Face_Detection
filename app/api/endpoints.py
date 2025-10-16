@@ -1,0 +1,442 @@
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Form
+from fastapi.responses import JSONResponse
+from typing import List, Optional
+import numpy as np
+import cv2
+import os
+import logging
+from datetime import datetime
+import tempfile
+import time
+
+
+# Import your modules
+from app.database.db_handler import DatabaseHandler
+from app.config import config
+from app.face_processing.encoding import FaceEncoder
+from app.face_processing.recognition import FaceRecognizer
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# Initialize components
+try:
+    db = DatabaseHandler(config.DATABASE_URL)
+    face_encoder = FaceEncoder()
+    face_recognizer = FaceRecognizer(face_encoder=face_encoder, registration_mode=True)
+    logger.info("API components initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize API components: {e}")
+    raise
+
+
+#If you plan to support multi-angle registration (front, left, right, tilt), you can easily extend this route to accept multiple images at once:
+
+#images: List[UploadFile] = File(...) and average their embeddings before saving — for more robust recognition
+
+@router.post("/register")
+async def register_face(
+    name: str = Form(...),
+    image: UploadFile = File(...)
+):
+    """
+    Register a new face using RetinaFace + FaceEncoder (FaceNet).
+    """
+    try:
+        # ✅ Validate image file
+        if not image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="File must be an image")
+
+        # ✅ Read uploaded image
+        contents = await image.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise HTTPException(status_code=400, detail="Invalid image data")
+
+        # ✅ Detect faces using RetinaFace via FaceRecognizer
+        detected_faces = face_recognizer._detect_faces_retinaface(frame)
+        if not detected_faces:
+            raise HTTPException(status_code=400, detail="No face detected in the image")
+        if len(detected_faces) > 1:
+            raise HTTPException(status_code=400, detail="Multiple faces detected. Please upload only one face.")
+
+        face_info = detected_faces[0]
+        x1, y1, x2, y2 = face_info["facial_area"]
+        detection_confidence = face_info["confidence"]
+
+        # ✅ Crop the detected face region
+        face_crop = frame[y1:y2, x1:x2]
+        if face_crop.size == 0:
+            raise HTTPException(status_code=400, detail="Failed to extract face region")
+
+        # ✅ Generate face encoding
+        face_encoding = face_encoder.encode_face_from_crop(face_crop)
+        if face_encoding is None:
+            raise HTTPException(status_code=400, detail="Failed to generate face encoding")
+
+        # ✅ Convert cropped face to bytes for DB storage
+        success, encoded_img = cv2.imencode(".jpg", face_crop)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to encode face image")
+        image_data = encoded_img.tobytes()
+
+        # ✅ Save user in database
+        result = db.add_user(
+            name=name,
+            image_data=image_data,
+            is_face_crop=True
+        )
+
+        if not result or result.get("status") != "success":
+            raise HTTPException(status_code=400, detail=result.get("message", "Failed to save user to database"))
+
+        # ✅ Update in-memory recognizer cache
+        face_recognizer.known_face_encodings.append(face_encoding)
+        face_recognizer.known_face_names.append(name)
+        face_recognizer.known_face_ids.append(result["id"])
+
+        # ✅ Return success response
+        return {
+            "status": "success",
+            "message": "Face registered successfully",
+            "user_id": result["id"],
+            "face_confidence": float(detection_confidence)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in register_face: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
+@router.post("/recognize")
+async def recognize_face(image: UploadFile = File(...), threshold: float = 0.7):
+    """Recognize a face from the uploaded image."""
+    try:
+        # Validate file type
+        if not image.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Read and decode image
+        contents = await image.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            raise HTTPException(status_code=400, detail="Invalid image file")
+        
+        # Convert to bytes for recognition (matching your db_handler)
+        _, buffer = cv2.imencode('.jpg', img)
+        image_bytes = buffer.tobytes()
+        
+        # Find similar face - CORRECTED to match your db_handler
+        match = db.find_similar_face(image_bytes, threshold=threshold)
+        
+        if not match:
+            return {
+                "status": "success", 
+                "recognized": False, 
+                "message": "No matching face found"
+            }
+        
+        return {
+            "status": "success",
+            "recognized": True,
+            "user": {
+                "id": match["id"],
+                "name": match["name"],
+                "confidence": float(match["similarity"]),
+                "distance": float(match.get("distance", 0)),
+                "faces_detected": match.get("faces_detected", 1),
+                "primary_face_confidence": match.get("primary_face_confidence", 0)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in recognize_face: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Recognition failed: {str(e)}")
+
+@router.get("/users")
+async def get_users():
+    """Get all registered users."""
+    try:
+        users = db.get_all_users()
+        return {
+            "status": "success", 
+            "count": len(users), 
+            "users": users
+        }
+    except Exception as e:
+        logger.error(f"Error in get_users: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch users: {str(e)}")
+
+@router.get("/users/{user_id}")
+async def get_user(user_id: int):
+    """Get a specific user by ID."""
+    try:
+        user = db.get_user(user_id)  # This returns a User object
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Convert User object to dictionary
+        user_data = {
+            "id": user.id,
+            "name": user.name,
+            "date_created": user.date_created,
+            "last_accessed": user.last_accessed,
+            "image_format": user.image_format
+        }
+        
+        return {"status": "success", "user": user_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_user: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch user: {str(e)}")
+
+@router.get("/users/{user_id}/image")
+async def get_user_image(user_id: int):
+    """Get user image data."""
+    try:
+        result = db.get_user_image(user_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="User image not found")
+        
+        image_data, image_format = result
+        
+        # Return as base64 or direct bytes depending on your needs
+        from fastapi.responses import Response
+        return Response(content=image_data, media_type=f"image/{image_format}")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_user_image: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch user image: {str(e)}")
+
+@router.delete("/users/{user_id}")
+async def delete_user(user_id: int):
+    """Delete a user by ID."""
+    try:
+        result = db.delete_user(user_id)
+        if result.get('status') != 'success':
+            raise HTTPException(status_code=404, detail=result.get('message', 'User not found'))
+        
+        return {"status": "success", "message": "User deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in delete_user: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete user: {str(e)}")
+
+@router.put("/users/{user_id}/face")
+async def update_user_face(user_id: int, image: UploadFile = File(...)):
+    """Update user's face encoding."""
+    try:
+        # Validate file type
+        if not image.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Read and decode image
+        contents = await image.read()
+        
+        # Update user face
+        result = db.update_user_face(user_id, contents)
+        
+        if result.get('status') != 'success':
+            raise HTTPException(status_code=400, detail=result.get('message', 'Failed to update face'))
+        
+        return {
+            "status": "success",
+            "message": "Face updated successfully",
+            "user_id": user_id,
+            "faces_detected": result.get('faces_detected', 0),
+            "confidence": result.get('primary_face_confidence', 0)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in update_user_face: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update face: {str(e)}")
+
+@router.get("/logs")
+async def get_logs(limit: int = 100):
+    """Get access logs."""
+    try:
+        logs = db.get_access_logs(limit=limit)
+        return {
+            "status": "success", 
+            "count": len(logs), 
+            "logs": logs
+        }    
+    except Exception as e:
+        logger.error(f"Error in get_logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {str(e)}")
+              
+
+@router.get("/stats")
+async def get_stats():
+    """Get system statistics."""
+    try:
+        user_count = db.get_user_count()
+        recent_logs = db.get_recent_access_logs(hours=24)
+        
+        return {
+            "status": "success",
+            "stats": {
+                "total_users": user_count,
+                "access_attempts_24h": len(recent_logs),
+                "successful_access": len([log for log in recent_logs if log.get('access_granted')]),
+                "failed_access": len([log for log in recent_logs if not log.get('access_granted')])
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error in get_stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+
+@router.post("/logs/cleanup")
+async def cleanup_logs(days: int = 30):
+    """Clean up old access logs."""
+    try:
+        deleted_count = db.cleanup_old_logs(days=days)
+        return {
+            "status": "success",
+            "message": f"Cleaned up {deleted_count} logs older than {days} days"
+        }
+    except Exception as e:
+        logger.error(f"Error in cleanup_logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup logs: {str(e)}")
+
+@router.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    try:
+        # Test database connection by getting user count
+        user_count = db.get_user_count()
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "total_users": user_count,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail="Service unhealthy")
+            
+@router.post("/video_recognition")
+async def video_recognition(
+    video: UploadFile = File(...),
+    threshold: float = Query(0.7, description="Face match similarity threshold"),
+    frame_skip: int = Query(15, description="Process every Nth frame for speed optimization"),
+):
+    """
+    Process uploaded video for face recognition.
+    - Detect faces frame-by-frame.
+    - Match each detected face with registered users.
+    - Validate if recognized; invalidate if unknown.
+    - Return total time taken and summary results.
+    """
+
+    start_time = time.time()
+
+    try:
+        # ✅ Save uploaded video temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+            tmp_video.write(await video.read())
+            tmp_path = tmp_video.name
+
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            raise HTTPException(status_code=400, detail="Cannot open uploaded video")
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_rate = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+        processed = 0
+        recognized = 0
+        unrecognized = 0
+
+        results = []
+
+        frame_index = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Skip frames for speed
+            if frame_index % frame_skip != 0:
+                frame_index += 1
+                continue
+
+            frame_index += 1
+            processed += 1
+
+            # Convert frame to bytes
+            success, buffer = cv2.imencode(".jpg", frame)
+            if not success:
+                continue
+            frame_bytes = buffer.tobytes()
+
+            # Run recognition
+            match = db.find_similar_face(frame_bytes, threshold=threshold)
+
+            if match:
+                recognized += 1
+                access_granted = True
+                user_id = match["id"]
+                db.log_access_attempt(user_id=user_id, confidence=match["similarity"], access_granted=True)
+
+                results.append({
+                    "frame": frame_index,
+                    "user_id": match["id"],
+                    "name": match["name"],
+                    "confidence": match["similarity"],
+                    "status": "VALID"
+                })
+            else:
+                unrecognized += 1
+                access_granted = False
+                db.log_access_attempt(user_id=None, confidence=0.0, access_granted=False)
+
+                results.append({
+                    "frame": frame_index,
+                    "user_id": None,
+                    "name": "Unknown",
+                    "confidence": 0.0,
+                    "status": "INVALID"
+                })
+
+        cap.release()
+        total_time = time.time() - start_time
+
+        summary = {
+            "status": "success",
+            "video_info": {
+                "frames_total": total_frames,
+                "frames_processed": processed,
+                "frame_rate": frame_rate,
+            },
+            "results": {
+                "recognized": recognized,
+                "unrecognized": unrecognized,
+                "processing_time_sec": round(total_time, 2),
+                "avg_time_per_frame_ms": round((total_time / processed) * 1000, 2) if processed > 0 else None
+            },
+            "logs": results[-10:]  # show last 10 detections for quick view
+        }
+
+        return JSONResponse(content=summary)
+
+    except Exception as e:
+        logger.exception(f"Error in video recognition: {e}")
+        raise HTTPException(status_code=500, detail=f"Video recognition failed: {str(e)}")
+
+    finally:
+        # Cleanup
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass        

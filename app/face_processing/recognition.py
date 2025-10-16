@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any, Union
 import time
+import torch
 
 from retinaface import RetinaFace
 
@@ -13,6 +14,26 @@ logger = logging.getLogger(__name__)
 
 class FaceRecognizer:
     def __init__(self, face_encoder, registration_mode: bool = False, create_dirs: bool = False):
+        """
+        Initialize FaceRecognizer.
+        """
+        # 1. DETERMINE DEVICE
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"FaceRecognizer using device: {self.device}")
+
+        # 2. INITIALIZE RETINAFACE MODEL ON DEVICE
+        #NOTE: RetinaFace doesn't expose a simple device parameter in its
+        # high-level API, so we manually load the model to force GPU use.
+        # This requires an internal understanding of the RetinaFace library.
+        # We'll use the official PyTorch implementation's approach.
+        '''try:
+            from retinaface.model import RetinaFace as RetinaFaceModel # Assuming this structure
+            self.detector_model = RetinaFaceModel.load_vgg_pretrain(self.device).eval()
+            logger.info(f"RetinaFace detector initialized on {self.device}")
+        except Exception as e:
+            logger.warning(f"Failed to explicitly load RetinaFace to {self.device}. Falling back to default library initialization: {e}")
+            self.detector_model = None''' # Use static method fallback later
+        
         """
         Initialize FaceRecognizer.
 
@@ -132,7 +153,18 @@ class FaceRecognizer:
         """
         try:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            faces = RetinaFace.detect_faces(rgb_frame)
+            # --- MODIFIED DETECTION CALL ---
+            if self.detector_model:
+                # OPTION 1: Use the explicitly loaded GPU model
+                # This requires a function that converts cv2 frame to PyTorch tensor on GPU
+                # and calls model(tensor). For simplicity, we adapt the static call below:
+                faces = RetinaFace.detect_faces(rgb_frame, model=self.detector_model, device=self.device)
+            else:
+                # OPTION 2: Fallback to the standard static method.
+                # Hope that RetinaFace uses GPU automatically if available.
+                faces = RetinaFace.detect_faces(rgb_frame)
+            # -------------------------------
+            #faces = RetinaFace.detect_faces(rgb_frame)
 
             face_data = []
             if isinstance(faces, dict):
@@ -141,7 +173,7 @@ class FaceRecognizer:
                         confidence = face_info.get('score', 0)
                         
                         # Filter by confidence
-                        if confidence < 0.7:  # Lowered threshold for better detection
+                        if confidence < 0.6:  # Lowered threshold for better detection
                             continue
                             
                         facial_area = face_info.get('facial_area')
@@ -173,95 +205,6 @@ class FaceRecognizer:
             logger.error(f"Error in face detection: {e}")
             return []
             
-    '''def _detect_faces_retinaface(self, frame: np.ndarray) -> List[Dict[str, Any]]:
-        """
-        Optimized face detection with RetinaFace using frame resizing and a lighter model.
-        """
-        try:
-            # --- 1. Frame Resizing for Speed (The main optimization) ---
-            height, width = frame.shape[:2]
-        
-            # Set a fixed maximum dimension for the detection process.
-            # Detecting faces on a smaller image is much faster.
-            MAX_DETECTION_DIM = 640  
-        
-            # Calculate scale factor
-            scale = min(MAX_DETECTION_DIM / width, MAX_DETECTION_DIM / height)
-        
-            # Only resize if the frame is larger than the max detection dimension
-            if scale < 1.0:
-                # New dimensions for the smaller frame
-                new_width = int(width * scale)
-                new_height = int(height * scale)
-            
-                # Use INTER_AREA for image shrinking (better quality)
-                small_frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
-            else:
-                small_frame = frame
-                scale = 1.0 # Ensure scale is 1.0 if no resizing occurred
-
-            # Convert to RGB (RetinaFace requirement)
-            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-        
-            # --- 2. Optimized Face Detection Call ---
-            # Use the lighter model ('mobile0.25') and set the confidence threshold directly
-            # in the detector for an efficient filter.
-            FACES_THRESHOLD = 0.7  
-            faces = RetinaFace.detect_faces(
-                rgb_small_frame,
-                threshold=FACES_THRESHOLD, 
-                model='mobile0.25' 
-            )
-
-            face_data = []
-            if isinstance(faces, dict):
-                for face_info in faces.values():
-                    try:
-                        confidence = face_info.get('score', 0)
-                        # No need for a second confidence check if the threshold was applied in detect_faces
-                    
-                        facial_area = face_info.get('facial_area')
-                        if facial_area is None:
-                            continue
-                        
-                        # Scale coordinates back to the original frame size
-                        # Note: facial_area from RetinaFace is [x1, y1, x2, y2]
-                        x1_s, y1_s, x2_s, y2_s = map(int, facial_area)
-                    
-                        # Inverse scaling to map to original frame
-                        x1 = int(x1_s / scale)
-                        y1 = int(y1_s / scale)
-                        x2 = int(x2_s / scale)
-                        y2 = int(y2_s / scale)
-                    
-                        # Clip coordinates to frame boundaries for safety
-                        x1 = max(0, x1)
-                        y1 = max(0, y1)
-                        x2 = min(width, x2)
-                        y2 = min(height, y2)
-                    
-                        # Final validation
-                        if x1 >= x2 or y1 >= y2:
-                            continue
-                        
-                        face_data.append({
-                            'facial_area': (x1, y1, x2, y2),
-                            'confidence': confidence,
-                            'landmarks': face_info.get('landmarks', {})
-                        })
-                        
-                    except Exception as e:
-                        # NOTE: Assuming 'logger' is accessible/imported
-                        logger.warning(f"Error processing a detected face: {e}")
-                        continue
-                        
-            return face_data
-            
-        except Exception as e:
-        # NOTE: Assuming 'logger' is accessible/imported
-            logger.error(f"Critical error in RetinaFace detection: {e}")
-            return []  '''      
-
     def process_frame(self, frame: np.ndarray, db_handler = None) -> Tuple[np.ndarray, List[Dict]]:
         """
         Detect, recognize or register faces in a frame.
@@ -347,126 +290,6 @@ class FaceRecognizer:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             return processed_frame, []
             
-    '''def process_frame(self, frame: np.ndarray, db_handler=None) -> Tuple[np.ndarray, List[Dict]]:
-        """
-        Detect, recognize or register faces in a frame with optimized batch processing.
-
-        Args:
-            frame: BGR image frame from OpenCV
-            db_handler: Database handler for registration/logging
-
-        Returns:
-            Tuple of (processed_frame, face_data_list)
-        """
-        start_time = time.time()
-        processed_frame = frame.copy() # Use a copy for drawing annotations
-        face_data_list = [] # Final list of processed face data
-
-        try:
-            # 1. Face Detection (Calls the optimized _detect_faces_retinaface)
-            detected_faces = self._detect_faces_retinaface(frame)
-        
-            if not detected_faces:
-                # Show "No faces detected" message on frame
-                cv2.putText(processed_frame, "No faces detected", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                # Track processing time even for missed detections
-                self._update_performance_metrics(start_time, processed_frame)
-                return processed_frame, face_data_list
-
-            # --- Setup for Batch Processing ---
-            face_encodings = []
-            valid_faces = []
-
-            # 2. Extract and Encode Valid Faces
-            for face_info in detected_faces:
-                x1, y1, x2, y2 = face_info['facial_area']
-            
-                # Use original detected area for encoding, skipping complex padding logic
-                # This relies on the detector providing a tight, clean bounding box.
-                face_region = frame[y1:y2, x1:x2]
-            
-                # Robustness check: Skip small or empty faces
-                if face_region.size == 0 or face_region.shape[0] < 40 or face_region.shape[1] < 40:
-                    cv2.rectangle(processed_frame, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue box for skipped
-                    continue
-                
-                # Get face encoding
-                encoding = self.face_encoder.encode_face_from_crop(face_region)
-            
-                if encoding is not None:
-                    face_encodings.append(encoding)
-                    # Store the original detection data (which will be updated later)
-                    valid_faces.append(face_info) 
-                else:
-                    # Draw red box for encoding failure
-                    cv2.rectangle(processed_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                    cv2.putText(processed_frame, "Encoding failed",
-                                (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                    continue
-
-            # 3. Recognition/Registration Logic (Batch for Recognition)
-            if self.registration_mode:
-                # Registration is typically single-face, so we iterate and call the method
-                for i, face in enumerate(valid_faces):
-                    face_encoding = face_encodings[i]
-                    x1, y1, x2, y2 = face['facial_area']
-                    face_region = frame[y1:y2, x1:x2] # Re-extract for registration
-                
-                    recognized_face = self._register_face(face_region, face_encoding, db_handler, face['facial_area'])
-                
-                    # Draw visualization
-                    self._draw_face_annotation(processed_frame, face, recognized_face, self.registration_mode)
-                
-                    if recognized_face:
-                        face_data_list.append(recognized_face)
-
-            elif face_encodings:
-                # BATCH RECOGNITION
-                recognized_faces = self._recognize_faces(face_encodings)
-            
-                # Match results back to the original face data
-                for i, (face, recognized) in enumerate(zip(valid_faces, recognized_faces)):
-                    # recognized contains 'name', 'distance', 'is_recognized'
-                    face.update(recognized)
-                    face_data_list.append(face)
-                
-                    # Draw annotations
-                    self._draw_face_annotation(processed_frame, face, recognized, self.registration_mode)
-
-            # 4. Performance Tracking (Simplified and moved to a helper)
-            self._update_performance_metrics(start_time, processed_frame)
-        
-            return processed_frame, face_data_list
-
-        except Exception as e:
-            # NOTE: Assuming 'logger' is accessible/imported
-            logger.error(f"Error processing frame: {e}")
-            cv2.putText(processed_frame, "Processing error", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            return processed_frame, []
-
-    # NOTE: This assumes the class has a new helper method for cleaner FPS display/tracking
-    # You would need to add this helper method to your class (e.g., FaceRecognitionSystem)
-    def _update_performance_metrics(self, start_time: float, frame: np.ndarray):
-        """Internal helper to calculate and display FPS"""
-        import numpy as np # Need numpy for mean
-    
-        processing_time = time.time() - start_time
-        self.processing_times.append(processing_time)
-    
-        # Maintain history size
-        if len(self.processing_times) > self.max_processing_time_history:
-            self.processing_times.pop(0)
-
-        # Calculate average time and FPS
-        avg_time = np.mean(self.processing_times) if self.processing_times else 0
-        fps = 1.0 / avg_time if avg_time > 0 else 0
-    
-        # Display performance info (using a different color/position for clarity from error)
-        cv2.putText(frame, f"FPS: {fps:.1f}", (10, frame.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1) '''       
-
     def _draw_face_annotation(self, frame: np.ndarray, face_info: Dict, 
                             recognized_face: Optional[Dict], registration_mode: bool) -> None:
         """

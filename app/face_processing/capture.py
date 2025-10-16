@@ -15,7 +15,7 @@ from facenet_pytorch import InceptionResnetV1
 
 logger = logging.getLogger(__name__)   
 
-class DepthEstimator:
+'''class DepthEstimator:
     def __init__(self, model_type: str = "DPT_Hybrid"):
         """Initialize depth estimation model"""
         logger.info(f"Initializing depth estimator with {model_type}")
@@ -69,7 +69,7 @@ class DepthEstimator:
             
         except Exception as e:
             logger.error(f"Depth prediction failed: {e}")
-            return np.zeros(frame.shape[:2], dtype=np.uint8)
+            return np.zeros(frame.shape[:2], dtype=np.uint8)'''
 
 
 class FaceDetector:
@@ -80,6 +80,9 @@ class FaceDetector:
         self.detection_cache = {}
         self.cache_size = 50
         self.min_confidence = 0.7
+        
+        '''self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"FaceDetector using device: {self.device}")'''
         
     def detect_faces(self, frame: np.ndarray) -> Optional[Dict[str, Any]]:
         """Detect faces in frame with caching"""
@@ -150,8 +153,8 @@ class VideoCapture:
         logger.info(f"Using device: {self.device}")
 
         # Initialize models based on enabled features
-        if enable_depth:
-            self.depth_estimator = DepthEstimator()
+        #if enable_depth:
+         #   self.depth_estimator = DepthEstimator()
         
         if enable_face:
             self.face_detector = FaceDetector(self.device)

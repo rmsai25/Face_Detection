@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        .video-column-header {
+            background-color: #f8f9fa; /* Light background for the selector area */
+            padding: 10px 15px 0 15px;
+            border-top-left-radius: 0.25rem;
+            border-top-right-radius: 0.25rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-md-8 offset-md-2">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h3 class="mb-0">Face Recognition System</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="camera-selector mb-3" id="cameraSelectorContainer">
+                                    <label for="cameraSelect" class="form-label small">Select Camera:</label>
+                                    <select class="form-select form-select-sm" id="cameraSelect">
+                                        <option value="" disabled selected>Loading Cameras...</option>
+                                    </select>
+                                </div>
+                                <div class="video-container mb-3">
+                                    <video id="video" width="100%" autoplay playsinline></video>
+                                    <canvas id="canvas" style="display: none;"></canvas>
+                                </div>
+                                <div class="d-grid gap-2">
+                                    <button id="startCamera" class="btn btn-primary">
+                                        <i class="fas fa-camera"></i> Start Camera
+                                    </button>
+                                    <button id="capture" class="btn btn-success" disabled>
+                                        <i class="fas fa-camera-retro"></i> Capture
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <ul class="nav nav-tabs card-header-tabs" id="myTab" role="tablist">
+                                            <li class="nav-item" role="presentation">
+                                                <button class="nav-link active" id="register-tab" data-bs-toggle="tab" 
+                                                    data-bs-target="#register" type="button" role="tab" aria-controls="register" 
+                                                    aria-selected="true">Register</button>
+                                            </li>
+                                            <li class="nav-item" role="presentation">
+                                                <button class="nav-link" id="recognize-tab" data-bs-toggle="tab" 
+                                                    data-bs-target="#recognize" type="button" role="tab" 
+                                                    aria-controls="recognize" aria-selected="false">Recognize</button>
+                                            </li>
+                                        </ul>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="tab-content" id="myTabContent">
+                                            <div class="tab-pane fade show active" id="register" role="tabpanel" aria-labelledby="register-tab">
+                                                <form id="registerForm">
+                                                    <div class="mb-3">
+                                                        <label for="name" class="form-label">Full Name</label>
+                                                        <input type="text" class="form-control" id="name" required>
+                                                    </div>
+                                                    <button type="submit" class="btn btn-primary w-100" id="registerBtn" disabled>
+                                                        <i class="fas fa-user-plus"></i> Register Face
+                                                    </button>
+                                                </form>
+                                                <div id="registerStatus" class="mt-2"></div>
+                                            </div>
+                                            
+                                            <div class="tab-pane fade" id="recognize" role="tabpanel" aria-labelledby="recognize-tab">
+                                                <div class="d-grid gap-2">
+                                                    <!--<button class="btn btn-success" id="recognizeBtn" disabled>
+                                                        <i class="fas fa-search"></i> Recognize Face
+                                                    </button>-->  
+                                                    <button class="btn btn-primary" id="startLiveBtn" onclick="startContinuousRecognition()">
+                                                        <i class="fas fa-play"></i> Start Live Recognition
+                                                    </button>
+                                                    <button class="btn btn-danger" id="stopLiveBtn" onclick="stopContinuousRecognition()">
+                                                        <i class="fas fa-stop"></i> Stop Recognition
+                                                    </button>
+                                                   
+                                                </div>
+                                                <div id="recognitionResult" class="mt-3">
+                                                    <div class="alert alert-info">
+                                                        <i class="fas fa-info-circle"></i> Click 'Recognize Face' to identify a person
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!--<div class="row mt-4">
+                            <div class="col-12">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <h5 class="mb-0">Access Logs</h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="table-responsive">
+                                            <table class="table table-sm table-striped">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Time</th>
+                                                        <th>Name</th>
+                                                        <th>Status</th>
+                                                        <th>Confidence</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="logsTable">
+                                                    <tr>
+                                                        <td colspan="4" class="text-center">No logs available</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>-->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
+
+
+
+
+
+

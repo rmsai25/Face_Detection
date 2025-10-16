@@ -120,7 +120,7 @@ class AccessLog(Base):
     confidence = Column(Float)
     access_granted = Column(Boolean, default=False)
     face_encoding = Column(NumpyArray(), nullable=True)  # This will ensure 512D
-    detection_metadata = Column(Text, nullable=True)  # JSON string for additional metadata
+    #detection_metadata = Column(Text, nullable=True)  # JSON string for additional metadata
     
     # Relationship with user
     user = relationship("User", back_populates="access_logs")
@@ -150,7 +150,7 @@ class AccessLog(Base):
             'timestamp': self.timestamp.isoformat() if self.timestamp else None,
             'confidence': self.confidence,
             'access_granted': self.access_granted,
-            'detection_metadata': self.get_detection_metadata()
+            #'detection_metadata': self.get_detection_metadata()
         }
 
 def init_db(database_url: str, echo: bool = False, **kwargs) -> sessionmaker:

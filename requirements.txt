@@ -11,12 +11,14 @@ psycopg2-binary
 python-dotenv
 
 timm
-tf-keras
+#tf-keras
 #keras-facenet
 
 facenet-pytorch
 retina-face
 scikit-learn
+
+#pip install git+https://github.com/serengil/retinaface.git
 
 
 #torch torchvision torchaudio
