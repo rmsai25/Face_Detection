@@ -130,8 +130,8 @@ async function startCamera() {
 
         const constraints = {
             video: { 
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
+                width: { ideal: 640 },
+                height: { ideal: 480 },
                 // Use the exact deviceId if one is selected, otherwise rely on browser default
                 deviceId: deviceId ? { exact: deviceId } : undefined
             },
@@ -218,7 +218,8 @@ function captureImage() {
     setTimeout(() => {
         video.style.opacity = '1';
     }, 200);
-    
+    //The image is converted to a base64-encoded JPEG string using canvas.toDataURL('image/jpeg', 0.9)
+   //The JPEG quality is set to 0.9 (90% quality)
     return canvas.toDataURL('image/jpeg', 0.9);
 }
 
@@ -521,8 +522,4 @@ window.addEventListener('resize', () => {
         canvas.height = video.videoHeight;
     }
 });
-
-
-
-
 

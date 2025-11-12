@@ -7,3 +7,7 @@ __pycache__/
 .my_venv312/
 venv/
 env/
+310insightface_env/
+/310insightface_env
+
+test_trt.py

@@ -21,8 +21,8 @@ class Config:
         self.FRAME_WIDTH = int(os.getenv('FRAME_WIDTH', 640))
         self.FRAME_HEIGHT = int(os.getenv('FRAME_HEIGHT', 480))
         
-        # Face Recognition settings
-        self.FACE_DETECTION_MODEL = os.getenv('FACE_DETECTION_MODEL', 'retinaface')
+        # Face Recognition settings - UPDATED FROM RETINAFACE TO INSIGHTFACE
+        self.FACE_DETECTION_MODEL = os.getenv('FACE_DETECTION_MODEL', 'insightface')
         self.RECOGNITION_THRESHOLD = float(os.getenv('RECOGNITION_THRESHOLD', 0.6))
         
         # Feature flags
@@ -40,6 +40,10 @@ class Config:
         
         # Display settings
         self.SHOW_VIDEO_FEED = self._get_bool('SHOW_VIDEO_FEED', True)
+        
+        # InsightFace specific settings - NEW
+        self.INSIGHTFACE_MODEL_NAME = os.getenv('INSIGHTFACE_MODEL_NAME', 'buffalo_l')
+        self.INSIGHTFACE_DET_THRESHOLD = float(os.getenv('INSIGHTFACE_DET_THRESHOLD', 0.6))
         
         # Validate configuration
         self._validate()
@@ -65,6 +69,13 @@ class Config:
         
         if not 0 <= self.RECOGNITION_THRESHOLD <= 1:
             raise ValueError("RECOGNITION_THRESHOLD must be between 0 and 1")
+        
+        # Validate InsightFace settings
+        if self.INSIGHTFACE_MODEL_NAME not in ['buffalo_l', 'buffalo_m', 'buffalo_s']:
+            raise ValueError(f"Unsupported InsightFace model: {self.INSIGHTFACE_MODEL_NAME}")
+        
+        if not 0 <= self.INSIGHTFACE_DET_THRESHOLD <= 1:
+            raise ValueError("INSIGHTFACE_DET_THRESHOLD must be between 0 and 1")
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary"""
@@ -88,8 +99,6 @@ def print_config_summary():
 
 if __name__ == "__main__":
     print_config_summary()
-
-
 
 
     

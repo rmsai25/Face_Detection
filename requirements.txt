@@ -1,29 +1,36 @@
-# Core dependencies
+#py -3.10 -m venv 310insightface_env
+
+
+#(310insightface_env) PS C:\Face_Detection> pip install torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124
+
+#torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124
+
+uvicorn
+
 opencv-python
 
-numpy<2
-#pip install numpy==1.26.4
-
-# Database
-SQLAlchemy
-psycopg2-binary
+fastapi uvicorn
 
 python-dotenv
 
-timm
-#tf-keras
-#keras-facenet
+SQLAlchemy
 
-facenet-pytorch
-retina-face
-scikit-learn
+insightface
 
-#pip install git+https://github.com/serengil/retinaface.git
+onnxruntime
+
+psycopg2-binary
+
+python-multipart
 
 
-#torch torchvision torchaudio
+#pip install --pre onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-nightly/pypi/simple/
+#Successfully installed onnxruntime-gpu-1.23.2
+  
 #use this version , pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 #For GPU (CUDA): pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 (The CUDA version may vary.)
 #For CPU only: pip install torch torchvision torchaudio
-#pip install opencv-python-headless
-#pip install timm
+
+#pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
+
+#pip install --pre torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128	

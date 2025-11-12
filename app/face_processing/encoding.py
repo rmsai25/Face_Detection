@@ -4,9 +4,9 @@ import numpy as np
 import tempfile
 import logging
 from typing import Tuple, List, Optional, Dict, Any, Union
-from retinaface import RetinaFace
+import insightface
+from insightface.app import FaceAnalysis
 import torch
-from facenet_pytorch import InceptionResnetV1
 from PIL import Image
 import torchvision.transforms as transforms
 
@@ -50,32 +50,6 @@ def find_cosine_distance(source_representation: Union[np.ndarray, List],
     cosine_similarity = np.sum(a * b, axis=1)
     return 1.0 - cosine_similarity
 
-def find_euclidean_distance(source_representation: Union[np.ndarray, List], 
-                           test_representation: Union[np.ndarray, List]) -> np.ndarray:
-    """
-    Calculate euclidean distance between two vectors.
-    
-    Args:
-        source_representation: Source vector or list of vectors
-        test_representation: Test vector or list of vectors
-        
-    Returns:
-        Euclidean distances
-    """
-    # Convert to numpy arrays
-    if isinstance(source_representation, list):
-        source_representation = np.array(source_representation, dtype=np.float32)
-    if isinstance(test_representation, list):
-        test_representation = np.array(test_representation, dtype=np.float32)
-
-    # Ensure 2D arrays
-    if len(source_representation.shape) == 1:
-        source_representation = np.expand_dims(source_representation, axis=0)
-    if len(test_representation.shape) == 1:
-        test_representation = np.expand_dims(test_representation, axis=0)
-
-    euclidean_distance = np.linalg.norm(source_representation - test_representation, axis=1)
-    return euclidean_distance
 
 def cosine_similarity(source_representation: Union[np.ndarray, List], 
                      test_representation: Union[np.ndarray, List]) -> np.ndarray:
@@ -94,7 +68,7 @@ def cosine_similarity(source_representation: Union[np.ndarray, List],
 
 class FaceEncoder:
     """
-    Face encoder using RetinaFace for detection and FaceNet for embedding generation.
+    Face encoder using InsightFace with SCRFD for detection and ArcFace for embedding generation.
     """
     
     # Default thresholds for different distance metrics
@@ -106,7 +80,7 @@ class FaceEncoder:
     
     def __init__(self, device: str = 'auto', distance_metric: str = 'cosine'):
         """
-        Initialize FaceEncoder with RetinaFace and FaceNet.
+        Initialize FaceEncoder with InsightFace (SCRFD + ArcFace).
         
         Args:
             device: 'auto', 'cuda', or 'cpu'
@@ -123,9 +97,15 @@ class FaceEncoder:
             logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
             logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
 
-        # Initialize models
-        self.detector = RetinaFace
-        self.model = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
+        # Initialize InsightFace model with SCRFD detector and ArcFace recognizer
+        self.app = FaceAnalysis(
+            name='buffalo_l',  # This includes SCRFD detector and ArcFace recognizer
+            providers=['CUDAExecutionProvider'] if self.device.type == 'cuda' else ['CPUExecutionProvider']
+        )
+        
+        # Prepare the model with appropriate context
+        ctx_id = 0 if self.device.type == 'cuda' else -1
+        self.app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         
         # Set distance metric and threshold
         self.distance_metric = distance_metric.lower()
@@ -135,18 +115,18 @@ class FaceEncoder:
             
         self.recognition_threshold = self.DEFAULT_THRESHOLDS.get(self.distance_metric, 0.6)
 
-        # FaceNet input preprocessing transform
+        # Transform for manual face processing (fallback)
         self.transform = transforms.Compose([
-            transforms.Resize((160, 160)),
+            transforms.Resize((112, 112)),  # InsightFace uses 112x112
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
         
-        logger.info(f"FaceEncoder initialized with {self.distance_metric} distance metric")
+        logger.info(f"FaceEncoder initialized with {self.distance_metric} distance metric using InsightFace")
 
     def detect_faces(self, image: np.ndarray) -> List[Tuple[int, int, int, int]]:
         """
-        Detect faces in an image using RetinaFace.
+        Detect faces in an image using InsightFace SCRFD.
         
         Args:
             image: BGR or RGB image array
@@ -155,52 +135,52 @@ class FaceEncoder:
             List of face bounding boxes as (top, right, bottom, left)
         """
         try:
-            # Convert to RGB if needed
+            # Convert to BGR if needed (InsightFace expects BGR by default)
             if len(image.shape) == 3 and image.shape[2] == 3:
                 if image.dtype == np.uint8:
-                    # Check if it's BGR (OpenCV default)
-                    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    # Check if it's RGB (convert to BGR for InsightFace)
+                    bgr_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
                 else:
-                    rgb_image = image
+                    bgr_image = image
             else:
-                rgb_image = image
+                bgr_image = image
 
-            # Detect faces using RetinaFace
-            faces = self.detector.detect_faces(rgb_image)
+            # Detect faces using InsightFace SCRFD
+            faces = self.app.get(bgr_image)
             
-            if not faces or not isinstance(faces, dict):
+            if not faces:
                 return []
 
             face_locations = []
-            for face_id, face_info in faces.items():
+            for face in faces:
                 try:
-                    confidence = face_info.get('score', 0)
+                    confidence = face.det_score
                     
                     # Filter by confidence
                     if confidence < 0.7:  # Minimum confidence threshold
                         continue
                         
-                    if 'facial_area' in face_info:
-                        x1, y1, x2, y2 = face_info['facial_area']
-                        face_locations.append((y1, x2, y2, x1))
-                    elif 'box' in face_info:
-                        x, y, w, h = face_info['box']
-                        face_locations.append((y, x + w, y + h, x))
+                    # Get bounding box (SCRFD returns [x1, y1, x2, y2])
+                    bbox = face.bbox.astype(int)
+                    x1, y1, x2, y2 = bbox
+                    
+                    # Convert to (top, right, bottom, left) format
+                    face_locations.append((y1, x2, y2, x1))
                         
                 except Exception as e:
-                    logger.warning(f"Error processing face {face_id}: {e}")
+                    logger.warning(f"Error processing face: {e}")
                     continue
 
             logger.debug(f"Detected {len(face_locations)} faces")
             return face_locations
             
         except Exception as e:
-            logger.error(f"Error detecting faces with RetinaFace: {e}")
+            logger.error(f"Error detecting faces with InsightFace SCRFD: {e}")
             return []
 
     def preprocess_face(self, face_image: np.ndarray) -> Optional[torch.Tensor]:
         """
-        Preprocess face image for FaceNet model.
+        Preprocess face image for InsightFace model.
         
         Args:
             face_image: RGB face image array
@@ -222,7 +202,6 @@ class FaceEncoder:
             elif face_image.shape[2] == 4:  # RGBA
                 face_image = cv2.cvtColor(face_image, cv2.COLOR_RGBA2RGB)
             elif face_image.shape[2] == 3:  # Assume BGR if from OpenCV
-                # Check if it's actually BGR by testing pixel values
                 face_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
 
             # Convert to PIL Image and apply transforms
@@ -239,7 +218,7 @@ class FaceEncoder:
                    image_array: Optional[np.ndarray] = None, 
                    is_face_crop: bool = False) -> Optional[np.ndarray]:
         """
-        Encode a face image to a 512D embedding using FaceNet.
+        Encode a face image to a 512D embedding using InsightFace ArcFace.
         
         Args:
             image_path: Path to image file
@@ -268,76 +247,138 @@ class FaceEncoder:
 
             # Process based on input type
             if is_face_crop:
-                face_img = img
+                # For cropped faces, we need to use InsightFace on the crop
+                # Convert to BGR for InsightFace
+                if len(img.shape) == 3 and img.shape[2] == 3:
+                    if img[0, 0, 0] > img[0, 0, 2]:
+                        bgr_crop = img
+                    else:
+                        bgr_crop = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                else:
+                    bgr_crop = img
+                
+                # Use InsightFace on the cropped face
+                faces = self.app.get(bgr_crop)
+                if not faces:
+                    logger.warning("No face detected in cropped image")
+                    return None
+                
+                # Use the face with highest confidence
+                face = max(faces, key=lambda x: x.det_score)
+                embedding = face.embedding
+                
             else:
-                # Detect face in full image
-                faces = self.detector.detect_faces(img)
+                # For full images, let InsightFace handle detection and embedding
+                # Convert to BGR for InsightFace
+                if len(img.shape) == 3 and img.shape[2] == 3:
+                    if img[0, 0, 0] > img[0, 0, 2]: 
+                        bgr_img = img
+                    else:
+                        bgr_img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                else:
+                    bgr_img = img
+                
+                faces = self.app.get(bgr_img)
                 if not faces:
                     logger.warning("No face detected in image")
                     return None
-                    
+                
                 # Use the face with highest confidence
-                face_info = max(faces.values(), key=lambda x: x.get('score', 0))
-                
-                if 'facial_area' in face_info:
-                    x1, y1, x2, y2 = face_info['facial_area']
-                elif 'box' in face_info:
-                    x, y, w, h = face_info['box']
-                    x1, y1, x2, y2 = x, y, x + w, y + h
-                else:
-                    logger.warning("No recognizable face bounding box format")
-                    return None
+                face = max(faces, key=lambda x: x.det_score)
+                embedding = face.embedding
 
-                # Extract face with margin
-                margin = 0.2
-                h, w = y2 - y1, x2 - x1
-                x1 = max(0, int(x1 - margin * w))
-                y1 = max(0, int(y1 - margin * h))
-                x2 = min(img.shape[1], int(x2 + margin * w))
-                y2 = min(img.shape[0], int(y2 + margin * h))
-                
-                face_img = img[y1:y2, x1:x2]
-                if face_img.size == 0:
-                    logger.warning("Empty face region after cropping")
-                    return None
-
-            # Generate embedding
-            face_tensor = self.preprocess_face(face_img)
-            if face_tensor is None:
-                return None
-
-            with torch.no_grad():
-                face_tensor = face_tensor.to(self.device)
-                embedding = self.model(face_tensor).cpu().numpy().flatten()
-
-            # Normalize embedding
-            embedding_norm = np.linalg.norm(embedding)
-            if embedding_norm > 0:
-                embedding = embedding / embedding_norm
-
+            # InsightFace embeddings are already normalized
+            embedding = embedding.astype(np.float32)
             logger.debug(f"Generated embedding with norm: {np.linalg.norm(embedding):.4f}")
-            return embedding.astype(np.float32)
+            return embedding
             
         except Exception as e:
             logger.error(f"Error encoding face: {e}")
             return None
-
+        
     def encode_face_from_crop(self, face_image: np.ndarray) -> Optional[np.ndarray]:
         """
-        Encode already cropped face image.
+    Encode already cropped face image using InsightFace.
+    
+    Args:
+        face_image: Cropped face image (BGR or RGB)
         
-        Args:
-            face_image: Cropped face image (BGR or RGB)
-            
-        Returns:
-            512D normalized embedding
-        """
-        return self.encode_face(image_array=face_image, is_face_crop=True)
+    Returns:
+        512D normalized embedding
+    """
+        try:
+            # Ensure the image is valid
+            if face_image is None or face_image.size == 0:
+                logger.warning("Empty or invalid face image provided")
+                return None
+
+            # Debug: Log the cropped image info
+            logger.debug(f"Cropped face image - Shape: {face_image.shape}, Type: {face_image.dtype}, "
+                        f"Min: {face_image.min()}, Max: {face_image.max()}")
+
+            # Handle different color formats
+            if len(face_image.shape) == 3 and face_image.shape[2] == 3:
+                # Check if it's likely RGB or BGR using a simple heuristic
+                # BGR typically has blue channel > red channel in natural images
+                if face_image.shape[0] > 10 and face_image.shape[1] > 10:  # Only if image is large enough
+                    blue_mean = np.mean(face_image[:, :, 0])
+                    red_mean = np.mean(face_image[:, :, 2])
+                
+                    if blue_mean < red_mean:  # If red > blue, likely RGB
+                        logger.debug("Converting cropped face from RGB to BGR")
+                        bgr_face_crop = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
+                    else:
+                        bgr_face_crop = face_image  # Already BGR
+                else:
+                    # For small images, try both formats
+                    bgr_face_crop = face_image
+            else:
+                bgr_face_crop = face_image
+
+            # Ensure the image is large enough for InsightFace
+            min_face_size = 20  # Minimum face size in pixels
+            if bgr_face_crop.shape[0] < min_face_size or bgr_face_crop.shape[1] < min_face_size:
+                logger.warning(f"Cropped face too small: {bgr_face_crop.shape}. Minimum: {min_face_size}x{min_face_size}")
+                return None
+
+            # Get embedding using InsightFace
+            faces = self.app.get(bgr_face_crop)
+        
+            if not faces:
+                logger.warning("No face detected in cropped image by InsightFace")
+                # Try with the original format as fallback
+                if len(face_image.shape) == 3 and face_image.shape[2] == 3:
+                    try:
+                        faces = self.app.get(face_image)  # Try original format
+                        if faces:
+                            logger.debug("Face detected using original image format")
+                    except Exception as e:
+                        logger.debug(f"Fallback detection failed: {e}")
+                return None
+
+            # Use the face with highest confidence
+            primary_face = max(faces, key=lambda x: x.det_score)
+            embedding = primary_face.embedding.astype(np.float32)
+
+            # Ensure normalization
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+                logger.debug(f"Generated embedding from crop - Norm: {norm:.4f}, Shape: {embedding.shape}")
+            else:
+                logger.warning("Zero-norm embedding generated")
+                return None
+
+            return embedding
+        
+        except Exception as e:
+            logger.error(f"Error extracting InsightFace embedding from crop: {e}")
+            return None
 
     def encode_faces(self, frame: np.ndarray, 
                     face_locations: List[Tuple[int, int, int, int]]) -> Tuple[List, List]:
         """
-        Encode multiple detected faces in a frame.
+        Encode multiple detected faces in a frame using InsightFace.
         
         Args:
             frame: RGB frame
@@ -349,25 +390,34 @@ class FaceEncoder:
         face_encodings = []
         valid_face_locations = []
 
+        # Convert frame to BGR for InsightFace
+        bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        
+        # Get all faces in one go using InsightFace
+        faces = self.app.get(bgr_frame)
+        
+        if not faces:
+            return [], []
+
+        # Match detected faces with provided locations
         for location in face_locations:
             try:
                 top, right, bottom, left = location
                 
-                # Extract face region with bounds checking
-                top = max(0, top)
-                left = max(0, left)
-                bottom = min(frame.shape[0], bottom)
-                right = min(frame.shape[1], right)
+                # Find the face that matches this location
+                matching_face = None
+                for face in faces:
+                    bbox = face.bbox.astype(int)
+                    x1, y1, x2, y2 = bbox
+                    
+                    # Check if this face matches the location (with some tolerance)
+                    if (abs(x1 - left) < 10 and abs(y1 - top) < 10 and 
+                        abs(x2 - right) < 10 and abs(y2 - bottom) < 10):
+                        matching_face = face
+                        break
                 
-                if top >= bottom or left >= right:
-                    continue
-                    
-                face_img = frame[top:bottom, left:right]
-                if face_img.size == 0:
-                    continue
-                    
-                embedding = self.encode_face_from_crop(face_img)
-                if embedding is not None:
+                if matching_face is not None:
+                    embedding = matching_face.embedding
                     face_encodings.append(embedding)
                     valid_face_locations.append(location)
                     
@@ -381,7 +431,7 @@ class FaceEncoder:
     def verify_faces(self, source_image: Union[str, np.ndarray], 
                     target_image: Union[str, np.ndarray]) -> Dict[str, Any]:
         """
-        Verify if two images contain the same face.
+        Verify if two images contain the same face using InsightFace.
         
         Args:
             source_image: Source image path or array
@@ -403,7 +453,7 @@ class FaceEncoder:
                     'distance': float('inf'),
                     'similarity': 0.0,
                     'message': 'No face found in source image',
-                    'model': 'FaceNet', 
+                    'model': 'InsightFace (ArcFace)', 
                     'distance_metric': self.distance_metric,
                     'threshold': self.recognition_threshold
                 }
@@ -420,7 +470,7 @@ class FaceEncoder:
                     'distance': float('inf'),
                     'similarity': 0.0,
                     'message': 'No face found in target image',
-                    'model': 'FaceNet', 
+                    'model': 'InsightFace (ArcFace)', 
                     'distance_metric': self.distance_metric,
                     'threshold': self.recognition_threshold
                 }
@@ -430,7 +480,7 @@ class FaceEncoder:
                 distance = find_cosine_distance(encoding1, encoding2)[0]
                 similarity = 1.0 - distance
             else:  # euclidean
-                distance = find_euclidean_distance(encoding1, encoding2)[0]
+                distance = np.linalg.norm(encoding1 - encoding2)
                 similarity = 1.0 / (1.0 + distance)  # Convert to similarity score
 
             verified = distance <= self.recognition_threshold
@@ -440,7 +490,7 @@ class FaceEncoder:
                 'distance': float(distance),
                 'similarity': float(similarity),
                 'threshold': self.recognition_threshold,
-                'model': 'FaceNet',
+                'model': 'InsightFace (ArcFace)',
                 'distance_metric': self.distance_metric,
                 'message': 'Verification successful' if verified else 'Faces do not match'
             }
@@ -452,7 +502,7 @@ class FaceEncoder:
                 'distance': float('inf'),
                 'similarity': 0.0,
                 'message': str(e),
-                'model': 'FaceNet',
+                'model': 'InsightFace (ArcFace)',
                 'distance_metric': self.distance_metric,
                 'threshold': self.recognition_threshold
             }
@@ -486,7 +536,7 @@ class FaceEncoder:
             return None, 0.0, False
 
         try:
-            # Normalize target encoding
+            # Normalize target encoding (InsightFace embeddings are already normalized, but ensure)
             target_encoding = np.array(target_encoding, dtype=np.float32).flatten()
             target_norm = np.linalg.norm(target_encoding)
             if target_norm < 1e-10:
@@ -555,7 +605,7 @@ class FaceEncoder:
 
     def process_frame(self, frame: np.ndarray) -> Tuple[List, List, np.ndarray]:
         """
-        Detect and encode faces from a BGR frame.
+        Detect and encode faces from a BGR frame using InsightFace.
         
         Args:
             frame: BGR image from OpenCV
@@ -564,13 +614,13 @@ class FaceEncoder:
             Tuple of (valid_face_locations, face_encodings, rgb_frame)
         """
         try:
-            # Convert to RGB
+            # Convert to RGB for compatibility with existing code
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Detect faces
+            # Detect faces using InsightFace SCRFD
             face_locations = self.detect_faces(rgb_frame)
             
-            # Encode faces
+            # Encode faces using InsightFace ArcFace
             valid_face_locations, face_encodings = self.encode_faces(rgb_frame, face_locations)
             
             return valid_face_locations, face_encodings, rgb_frame
@@ -601,12 +651,13 @@ class FaceEncoder:
             Dictionary with model info
         """
         return {
-            'face_detector': 'RetinaFace',
-            'face_recognizer': 'FaceNet (InceptionResnetV1)',
+            'face_detector': 'SCRFD (via InsightFace)',
+            'face_recognizer': 'ArcFace (via InsightFace)',
             'embedding_dim': 512,
             'distance_metric': self.distance_metric,
             'threshold': self.recognition_threshold,
-            'device': str(self.device)
+            'device': str(self.device),
+            'model_name': 'buffalo_l'
         }
 
 
@@ -633,4 +684,3 @@ if __name__ == "__main__":
             print(f"Encoding shape: {encoding.shape}, norm: {np.linalg.norm(encoding):.4f}")
     else:
         print("Test images not found, please update paths")
-

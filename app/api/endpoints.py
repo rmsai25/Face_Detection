@@ -24,7 +24,7 @@ try:
     db = DatabaseHandler(config.DATABASE_URL)
     face_encoder = FaceEncoder()
     face_recognizer = FaceRecognizer(face_encoder=face_encoder, registration_mode=True)
-    logger.info("API components initialized successfully")
+    logger.info("API components initialized successfully with InsightFace + SCRFD")
 except Exception as e:
     logger.error(f"Failed to initialize API components: {e}")
     raise
@@ -40,7 +40,7 @@ async def register_face(
     image: UploadFile = File(...)
 ):
     """
-    Register a new face using RetinaFace + FaceEncoder (FaceNet).
+    Register a new face using InsightFace SCRFD + ArcFace.
     """
     try:
         # ✅ Validate image file
@@ -50,49 +50,61 @@ async def register_face(
         # ✅ Read uploaded image
         contents = await image.read()
         nparr = np.frombuffer(contents, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)  # This loads as BGR
         if frame is None:
             raise HTTPException(status_code=400, detail="Invalid image data")
 
-        # ✅ Detect faces using RetinaFace via FaceRecognizer
-        detected_faces = face_recognizer._detect_faces_retinaface(frame)
-        if not detected_faces:
-            raise HTTPException(status_code=400, detail="No face detected in the image")
-        if len(detected_faces) > 1:
-            raise HTTPException(status_code=400, detail="Multiple faces detected. Please upload only one face.")
+        logger.info(f"Processing registration for {name} - Image shape: {frame.shape}")
 
-        face_info = detected_faces[0]
-        x1, y1, x2, y2 = face_info["facial_area"]
-        detection_confidence = face_info["confidence"]
+        # ✅ Use FaceEncoder directly for better reliability
+        face_locations, face_encodings, _ = face_encoder.process_frame(frame)
+        if face_encodings:
+            embedding = face_encodings[0]  # Get the first face's embedding
+            faces = [{'bbox': loc, 'confidence': 1.0} for loc in face_locations]  # Create faces list with bbox and confidence
+        else:
+            embedding, faces = None, []
+            
+        if not faces:
+            raise HTTPException(
+                status_code=400, 
+                detail="No face detected in the image. Please ensure:\n"
+                      "- The face is clearly visible\n"
+                      "- Good lighting conditions\n"
+                      "- Front-facing pose\n"
+                      "- No extreme angles or occlusions"
+            )
+            
+        if len(faces) > 1:
+            raise HTTPException(
+                status_code=400, 
+                detail="Multiple faces detected. Please upload an image with only one clearly visible face."
+            )
 
-        # ✅ Crop the detected face region
-        face_crop = frame[y1:y2, x1:x2]
-        if face_crop.size == 0:
-            raise HTTPException(status_code=400, detail="Failed to extract face region")
-
-        # ✅ Generate face encoding
-        face_encoding = face_encoder.encode_face_from_crop(face_crop)
-        if face_encoding is None:
+        face_info = faces[0]
+        detection_confidence = face_info['confidence']
+        
+        # ✅ Use the embedding from process_image (more reliable)
+        if embedding is None:
             raise HTTPException(status_code=400, detail="Failed to generate face encoding")
 
-        # ✅ Convert cropped face to bytes for DB storage
-        success, encoded_img = cv2.imencode(".jpg", face_crop)
+        # ✅ Convert the original image to bytes for DB storage
+        success, encoded_img = cv2.imencode(".jpg", frame)
         if not success:
-            raise HTTPException(status_code=500, detail="Failed to encode face image")
+            raise HTTPException(status_code=500, detail="Failed to encode image")
         image_data = encoded_img.tobytes()
 
         # ✅ Save user in database
         result = db.add_user(
             name=name,
             image_data=image_data,
-            is_face_crop=True
+            is_face_crop=False  # Use full image, not cropped
         )
 
         if not result or result.get("status") != "success":
             raise HTTPException(status_code=400, detail=result.get("message", "Failed to save user to database"))
 
         # ✅ Update in-memory recognizer cache
-        face_recognizer.known_face_encodings.append(face_encoding)
+        face_recognizer.known_face_encodings.append(embedding)
         face_recognizer.known_face_names.append(name)
         face_recognizer.known_face_ids.append(result["id"])
 
@@ -101,7 +113,8 @@ async def register_face(
             "status": "success",
             "message": "Face registered successfully",
             "user_id": result["id"],
-            "face_confidence": float(detection_confidence)
+            "face_confidence": float(detection_confidence),
+            "model": "InsightFace (SCRFD + ArcFace)"
         }
 
     except HTTPException:
@@ -112,7 +125,7 @@ async def register_face(
 
 @router.post("/recognize")
 async def recognize_face(image: UploadFile = File(...), threshold: float = 0.7):
-    """Recognize a face from the uploaded image."""
+    """Recognize a face from the uploaded image using InsightFace."""
     try:
         # Validate file type
         if not image.content_type.startswith('image/'):
@@ -137,7 +150,8 @@ async def recognize_face(image: UploadFile = File(...), threshold: float = 0.7):
             return {
                 "status": "success", 
                 "recognized": False, 
-                "message": "No matching face found"
+                "message": "No matching face found",
+                "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
             }
         
         return {
@@ -150,7 +164,8 @@ async def recognize_face(image: UploadFile = File(...), threshold: float = 0.7):
                 "distance": float(match.get("distance", 0)),
                 "faces_detected": match.get("faces_detected", 1),
                 "primary_face_confidence": match.get("primary_face_confidence", 0)
-            }
+            },
+            "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
         }
         
     except Exception as e:
@@ -165,7 +180,8 @@ async def get_users():
         return {
             "status": "success", 
             "count": len(users), 
-            "users": users
+            "users": users,
+            "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
         }
     except Exception as e:
         logger.error(f"Error in get_users: {str(e)}")
@@ -188,7 +204,11 @@ async def get_user(user_id: int):
             "image_format": user.image_format
         }
         
-        return {"status": "success", "user": user_data}
+        return {
+            "status": "success", 
+            "user": user_data,
+            "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -223,7 +243,11 @@ async def delete_user(user_id: int):
         if result.get('status') != 'success':
             raise HTTPException(status_code=404, detail=result.get('message', 'User not found'))
         
-        return {"status": "success", "message": "User deleted successfully"}
+        return {
+            "status": "success", 
+            "message": "User deleted successfully",
+            "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -232,7 +256,7 @@ async def delete_user(user_id: int):
 
 @router.put("/users/{user_id}/face")
 async def update_user_face(user_id: int, image: UploadFile = File(...)):
-    """Update user's face encoding."""
+    """Update user's face encoding using InsightFace."""
     try:
         # Validate file type
         if not image.content_type.startswith('image/'):
@@ -252,7 +276,8 @@ async def update_user_face(user_id: int, image: UploadFile = File(...)):
             "message": "Face updated successfully",
             "user_id": user_id,
             "faces_detected": result.get('faces_detected', 0),
-            "confidence": result.get('primary_face_confidence', 0)
+            "confidence": result.get('primary_face_confidence', 0),
+            "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
         }
         
     except HTTPException:
@@ -269,7 +294,8 @@ async def get_logs(limit: int = 100):
         return {
             "status": "success", 
             "count": len(logs), 
-            "logs": logs
+            "logs": logs,
+            "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
         }    
     except Exception as e:
         logger.error(f"Error in get_logs: {str(e)}")
@@ -290,7 +316,8 @@ async def get_stats():
                 "access_attempts_24h": len(recent_logs),
                 "successful_access": len([log for log in recent_logs if log.get('access_granted')]),
                 "failed_access": len([log for log in recent_logs if not log.get('access_granted')])
-            }
+            },
+            "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
         }
     except Exception as e:
         logger.error(f"Error in get_stats: {str(e)}")
@@ -303,7 +330,8 @@ async def cleanup_logs(days: int = 30):
         deleted_count = db.cleanup_old_logs(days=days)
         return {
             "status": "success",
-            "message": f"Cleaned up {deleted_count} logs older than {days} days"
+            "message": f"Cleaned up {deleted_count} logs older than {days} days",
+            "model": "InsightFace (SCRFD + ArcFace)"  # NEW: Added model info
         }
     except Exception as e:
         logger.error(f"Error in cleanup_logs: {str(e)}")
@@ -319,6 +347,7 @@ async def health_check():
             "status": "healthy",
             "database": "connected",
             "total_users": user_count,
+            "model": "InsightFace (SCRFD + ArcFace)",  # NEW: Added model info
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
@@ -330,103 +359,180 @@ async def video_recognition(
     video: UploadFile = File(...),
     threshold: float = Query(0.7, description="Face match similarity threshold"),
     frame_skip: int = Query(15, description="Process every Nth frame for speed optimization"),
+    batch_size: int = Query(16, description="Number of frames to process in each batch"),
 ):
     """
-    Process uploaded video for face recognition.
-    - Detect faces frame-by-frame.
-    - Match each detected face with registered users.
-    - Validate if recognized; invalidate if unknown.
-    - Return total time taken and summary results.
+    Process uploaded video for face recognition using InsightFace with batch processing.
+    - Processes frames in batches for better GPU utilization
+    - Detects faces using SCRFD
+    - Matches faces with registered users using ArcFace
+    - Returns recognition results with timing information
     """
+    from fastapi.concurrency import run_in_threadpool
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from typing import List, Tuple, Dict, Any
+    
+    async def process_video_batch(frames_batch: List[Tuple[int, np.ndarray]], 
+                                threshold: float) -> List[Dict[str, Any]]:
+        """Process a batch of frames and return recognition results."""
+        batch_results = []
+        
+        # Process frames in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor() as executor:
+            loop = asyncio.get_event_loop()
+            tasks = []
+            
+            for frame_idx, frame in frames_batch:
+                # Convert frame to bytes for the database function
+                success, buffer = cv2.imencode(".jpg", frame)
+                if not success:
+                    continue
+                frame_bytes = buffer.tobytes()
+                
+                # Run recognition in thread pool
+                task = loop.run_in_executor(
+                    executor, 
+                    db.find_similar_face,
+                    frame_bytes,
+                    threshold
+                )
+                tasks.append((frame_idx, frame, task))
+            
+            # Gather all results
+            for frame_idx, frame, task in tasks:
+                try:
+                    match = await task
+                    
+                    if match:
+                        user_id = match["id"]
+                        db.log_access_attempt(
+                            user_id=user_id, 
+                            confidence=match["similarity"], 
+                            access_granted=True
+                        )
+                        
+                        batch_results.append({
+                            "frame": frame_idx,
+                            "user_id": user_id,
+                            "name": match["name"],
+                            "confidence": match["similarity"],
+                            "status": "VALID"
+                        })
+                    else:
+                        db.log_access_attempt(
+                            user_id=None, 
+                            confidence=0.0, 
+                            access_granted=False
+                        )
+                        
+                        batch_results.append({
+                            "frame": frame_idx,
+                            "user_id": None,
+                            "name": "Unknown",
+                            "confidence": 0.0,
+                            "status": "INVALID"
+                        })
+                except Exception as e:
+                    logger.error(f"Error processing frame {frame_idx}: {e}")
+                    
+        return batch_results
 
     start_time = time.time()
-
+    tmp_path = None
+    
     try:
-        # ✅ Save uploaded video temporarily
+        # Save uploaded video temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
             tmp_video.write(await video.read())
             tmp_path = tmp_video.name
 
+        # Open video file
         cap = cv2.VideoCapture(tmp_path)
         if not cap.isOpened():
             raise HTTPException(status_code=400, detail="Cannot open uploaded video")
 
+        # Get video properties
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_rate = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+        
+        # Initialize counters
         processed = 0
         recognized = 0
         unrecognized = 0
-
         results = []
-
         frame_index = 0
+        
+        # Process frames in batches
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Skip frames for speed
-            if frame_index % frame_skip != 0:
+            frames_batch = []
+            
+            # Read a batch of frames
+            while len(frames_batch) < batch_size:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
+                # Skip frames according to frame_skip
+                if frame_index % frame_skip == 0:
+                    frames_batch.append((frame_index, frame))
+                    processed += 1
+                
                 frame_index += 1
-                continue
-
-            frame_index += 1
-            processed += 1
-
-            # Convert frame to bytes
-            success, buffer = cv2.imencode(".jpg", frame)
-            if not success:
-                continue
-            frame_bytes = buffer.tobytes()
-
-            # Run recognition
-            match = db.find_similar_face(frame_bytes, threshold=threshold)
-
-            if match:
-                recognized += 1
-                access_granted = True
-                user_id = match["id"]
-                db.log_access_attempt(user_id=user_id, confidence=match["similarity"], access_granted=True)
-
-                results.append({
-                    "frame": frame_index,
-                    "user_id": match["id"],
-                    "name": match["name"],
-                    "confidence": match["similarity"],
-                    "status": "VALID"
-                })
-            else:
-                unrecognized += 1
-                access_granted = False
-                db.log_access_attempt(user_id=None, confidence=0.0, access_granted=False)
-
-                results.append({
-                    "frame": frame_index,
-                    "user_id": None,
-                    "name": "Unknown",
-                    "confidence": 0.0,
-                    "status": "INVALID"
-                })
-
+                
+                # Stop if we've reached the end of the video
+                if frame_index >= total_frames:
+                    break
+            
+            # If no frames were read, we're done
+            if not frames_batch:
+                break
+            
+            # Process the current batch
+            batch_results = await process_video_batch(frames_batch, threshold)
+            
+            # Update counters
+            for result in batch_results:
+                if result["status"] == "VALID":
+                    recognized += 1
+                else:
+                    unrecognized += 1
+            
+            results.extend(batch_results)
+            
+            # If we've reached the end of the video, break the loop
+            if frame_index >= total_frames:
+                break
+        
+        # Release video capture
         cap.release()
+        
+        # Calculate processing time
         total_time = time.time() - start_time
-
+        
+        # Prepare response
         summary = {
             "status": "success",
             "video_info": {
                 "frames_total": total_frames,
                 "frames_processed": processed,
                 "frame_rate": frame_rate,
+                "batch_size": batch_size,
+                "frame_skip": frame_skip
             },
             "results": {
                 "recognized": recognized,
                 "unrecognized": unrecognized,
+                "recognition_rate": round(recognized / max(processed, 1), 2),
                 "processing_time_sec": round(total_time, 2),
-                "avg_time_per_frame_ms": round((total_time / processed) * 1000, 2) if processed > 0 else None
+                "avg_time_per_frame_ms": round((total_time / max(processed, 1)) * 1000, 2),
+                "fps": round(processed / max(total_time, 0.1), 2)
             },
-            "logs": results[-10:]  # show last 10 detections for quick view
+            "logs": results[-10:],  # Last 10 detections
+            "model": "InsightFace (SCRFD + ArcFace)",
+            "timestamp": datetime.now().isoformat()
         }
-
+        
         return JSONResponse(content=summary)
 
     except Exception as e:
@@ -439,4 +545,4 @@ async def video_recognition(
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except Exception:
-            pass        
+            pass

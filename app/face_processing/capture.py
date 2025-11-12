@@ -10,70 +10,14 @@ from typing import Tuple, List, Optional, Dict, Any
 import threading
 from queue import Queue
 
-from retinaface import RetinaFace
-from facenet_pytorch import InceptionResnetV1
+import insightface
+from insightface.app import FaceAnalysis
+from insightface.data import get_image as ins_get_image
 
 logger = logging.getLogger(__name__)   
 
-'''class DepthEstimator:
-    def __init__(self, model_type: str = "DPT_Hybrid"):
-        """Initialize depth estimation model"""
-        logger.info(f"Initializing depth estimator with {model_type}")
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # GPU info logging
-        if torch.cuda.is_available():
-            logger.info(f"GPU: {torch.cuda.device_count()}x {torch.cuda.get_device_name()}")
-            logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
-        
-        try:
-            # Load model with error handling
-            self.model = torch.hub.load("intel-isl/MiDaS", model_type, trust_repo=True)
-            self.model.to(self.device).eval()
-            
-            # Load transforms
-            midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
-            self.transform = (
-                midas_transforms.dpt_transform
-                if "DPT" in model_type
-                else midas_transforms.small_transform
-            )
-            
-            logger.info("✅ Depth estimator initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize depth estimator: {e}")
-            raise
-
-    def predict_depth(self, frame: np.ndarray) -> np.ndarray:
-        """Predict depth map from frame"""
-        try:
-            # Convert BGR to RGB for MiDaS
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Apply transform and predict
-            input_batch = self.transform(rgb_frame).to(self.device)
-            
-            with torch.no_grad():
-                prediction = self.model(input_batch)
-                prediction = torch.nn.functional.interpolate(
-                    prediction.unsqueeze(1),
-                    size=frame.shape[:2],
-                    mode="bicubic",
-                    align_corners=False,
-                ).squeeze()
-            
-            # Convert to 8-bit depth map
-            depth_map = prediction.cpu().numpy()
-            depth_map = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
-            return depth_map.astype(np.uint8)
-            
-        except Exception as e:
-            logger.error(f"Depth prediction failed: {e}")
-            return np.zeros(frame.shape[:2], dtype=np.uint8)'''
-
-
 class FaceDetector:
-    """Dedicated face detection class with caching and optimization"""
+    """Dedicated face detection class with caching and optimization using InsightFace SCRFD"""
     
     def __init__(self, device: torch.device):
         self.device = device
@@ -81,11 +25,17 @@ class FaceDetector:
         self.cache_size = 50
         self.min_confidence = 0.7
         
-        '''self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"FaceDetector using device: {self.device}")'''
+        # Initialize InsightFace with SCRFD detector
+        self.app = FaceAnalysis(
+            name='buffalo_l',  # This uses SCRFD as detector
+            providers=['CUDAExecutionProvider'] if device.type == 'cuda' else ['CPUExecutionProvider']
+        )
+        self.app.prepare(ctx_id=0 if device.type == 'cuda' else -1, det_size=(640, 640))
+        
+        logger.info(f"FaceDetector using device: {self.device} with InsightFace SCRFD")
         
     def detect_faces(self, frame: np.ndarray) -> Optional[Dict[str, Any]]:
-        """Detect faces in frame with caching"""
+        """Detect faces in frame with caching using InsightFace SCRFD"""
         try:
             # Simple frame hash for caching
             frame_hash = hash(frame.tobytes())
@@ -93,21 +43,32 @@ class FaceDetector:
             if frame_hash in self.detection_cache:
                 return self.detection_cache[frame_hash]
             
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            detections = RetinaFace.detect_faces(rgb_frame)
+            # InsightFace expects BGR format by default
+            bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) if len(frame.shape) == 3 and frame.shape[2] == 3 else frame
             
-            if not detections or not isinstance(detections, dict):
+            # Perform face detection with InsightFace
+            faces = self.app.get(bgr_frame)
+            
+            if not faces:
                 return None
             
-            # Filter by confidence and extract face data
+            # Convert InsightFace results to our format
             valid_faces = []
-            for face_id, face_info in detections.items():
-                if face_info['score'] >= self.min_confidence:
+            for i, face in enumerate(faces):
+                if face.det_score >= self.min_confidence:
+                    bbox = face.bbox.astype(int)
                     valid_faces.append({
-                        'bbox': face_info['facial_area'],
-                        'confidence': face_info['score'],
-                        'landmarks': face_info.get('landmarks', {}),
-                        'face_id': face_id
+                        'bbox': [bbox[0], bbox[1], bbox[2], bbox[3]],  # [x1, y1, x2, y2]
+                        'confidence': face.det_score,
+                        'landmarks': {
+                            'left_eye': face.kps[0].tolist() if face.kps is not None else [],
+                            'right_eye': face.kps[1].tolist() if face.kps is not None else [],
+                            'nose': face.kps[2].tolist() if face.kps is not None else [],
+                            'mouth_left': face.kps[3].tolist() if face.kps is not None else [],
+                            'mouth_right': face.kps[4].tolist() if face.kps is not None else []
+                        },
+                        'embedding': face.embedding if hasattr(face, 'embedding') else None,
+                        'face_id': i
                     })
             
             result = {'faces': valid_faces} if valid_faces else None
@@ -154,16 +115,15 @@ class VideoCapture:
 
         # Initialize models based on enabled features
         #if enable_depth:
-         #   self.depth_estimator = DepthEstimator()
+        #   self.depth_estimator = DepthEstimator()
         
         if enable_face:
             self.face_detector = FaceDetector(self.device)
-            self.embedder = InceptionResnetV1(pretrained="vggface2").eval().to(self.device)
-            
-            # Enhanced face preprocessing
+            # InsightFace already provides embeddings, so we don't need separate embedder
+            # But we keep the transform for compatibility if needed
             self.transform = transforms.Compose([
                 transforms.ToPILImage(),
-                transforms.Resize((160, 160)),
+                transforms.Resize((112, 112)),  # InsightFace uses 112x112 for recognition
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
@@ -251,24 +211,29 @@ class VideoCapture:
 
     def detect_and_embed(self, frame: np.ndarray) -> Tuple[Optional[List], Optional[List]]:
         """
-        Detect faces and compute embeddings with enhanced error handling
+        Detect faces and compute embeddings with enhanced error handling using InsightFace
         """
         if not self.enable_face:
             return None, None
             
         try:
-            detection_result = self.face_detector.detect_faces(frame)
+            # InsightFace works directly with BGR frames, so we convert if needed
+            if len(frame.shape) == 3 and frame.shape[2] == 3:
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            else:
+                rgb_frame = frame
+                
+            detection_result = self.face_detector.detect_faces(rgb_frame)
             if not detection_result:
                 return None, None
 
             embeddings = []
             bboxes = []
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             for face_data in detection_result['faces']:
                 x1, y1, x2, y2 = face_data['bbox']
                 
-                # Add margin to face crop
+                # Add margin to face crop (optional)
                 margin = 0.2
                 h, w = y2 - y1, x2 - x1
                 x1 = max(0, int(x1 - margin * w))
@@ -276,26 +241,29 @@ class VideoCapture:
                 x2 = min(frame.shape[1], int(x2 + margin * w))
                 y2 = min(frame.shape[0], int(y2 + margin * h))
                 
-                cropped_face = rgb_frame[y1:y2, x1:x2]
-                
-                if cropped_face.size == 0:
-                    continue
-
-                try:
-                    # Process face for embedding
-                    face_tensor = self.transform(cropped_face).unsqueeze(0).to(self.device)
-                    
-                    with torch.no_grad():
-                        embedding = self.embedder(face_tensor).cpu().numpy()[0]
-                    
+                # Get embedding directly from InsightFace result
+                if face_data.get('embedding') is not None:
+                    embedding = face_data['embedding']
                     # Normalize embedding
                     embedding = embedding / np.linalg.norm(embedding)
                     embeddings.append(embedding)
                     bboxes.append((x1, y1, x2, y2, face_data['confidence']))
-                    
-                except Exception as e:
-                    logger.warning(f"Face embedding failed: {e}")
-                    continue
+                else:
+                    # Fallback: extract face and compute embedding if not available
+                    try:
+                        cropped_face = rgb_frame[y1:y2, x1:x2]
+                        if cropped_face.size == 0:
+                            continue
+                            
+                        face_tensor = self.transform(cropped_face).unsqueeze(0).to(self.device)
+                        # Note: This would require a separate InsightFace model for embedding only
+                        # For now, we rely on the embedding from detection
+                        logger.warning("Embedding not available in detection result")
+                        continue
+                        
+                    except Exception as e:
+                        logger.warning(f"Face embedding fallback failed: {e}")
+                        continue
 
             return embeddings, bboxes if embeddings else (None, None)
             
@@ -307,7 +275,9 @@ class VideoCapture:
         """Generate depth map from frame"""
         if not self.enable_depth:
             return None
-        return self.depth_estimator.predict_depth(frame)
+        # Placeholder for depth estimation
+        # return self.depth_estimator.predict_depth(frame)
+        return None
 
     def draw_detections(self, frame: np.ndarray, bboxes: List, fps: int = None) -> np.ndarray:
         """Draw face detections and info on frame"""
@@ -458,5 +428,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
