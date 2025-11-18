@@ -9,7 +9,6 @@ from datetime import datetime
 import tempfile
 import time
 
-
 # Import your modules
 from app.database.db_handler import DatabaseHandler
 from app.config import config
@@ -37,84 +36,125 @@ except Exception as e:
 @router.post("/register")
 async def register_face(
     name: str = Form(...),
-    image: UploadFile = File(...)
+    images: List[UploadFile] = File(default=[]),
+    image: UploadFile = File(default=None)
 ):
     """
     Register a new face using InsightFace SCRFD + ArcFace.
+    Supports both single image ('image' field) and multiple images ('images' field) for multi-angle registration.
     """
     try:
-        # ✅ Validate image file
-        if not image.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="File must be an image")
-
-        # ✅ Read uploaded image
-        contents = await image.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)  # This loads as BGR
-        if frame is None:
-            raise HTTPException(status_code=400, detail="Invalid image data")
-
-        logger.info(f"Processing registration for {name} - Image shape: {frame.shape}")
-
-        # ✅ Use FaceEncoder directly for better reliability
-        face_locations, face_encodings, _ = face_encoder.process_frame(frame)
-        if face_encodings:
-            embedding = face_encodings[0]  # Get the first face's embedding
-            faces = [{'bbox': loc, 'confidence': 1.0} for loc in face_locations]  # Create faces list with bbox and confidence
-        else:
-            embedding, faces = None, []
-            
-        if not faces:
-            raise HTTPException(
-                status_code=400, 
-                detail="No face detected in the image. Please ensure:\n"
-                      "- The face is clearly visible\n"
-                      "- Good lighting conditions\n"
-                      "- Front-facing pose\n"
-                      "- No extreme angles or occlusions"
-            )
-            
-        if len(faces) > 1:
-            raise HTTPException(
-                status_code=400, 
-                detail="Multiple faces detected. Please upload an image with only one clearly visible face."
-            )
-
-        face_info = faces[0]
-        detection_confidence = face_info['confidence']
+        embeddings = []
+        processed_images = 0
+        errors = []
+        first_image_data = None
+        detection_confidence = 0.0
         
-        # ✅ Use the embedding from process_image (more reliable)
-        if embedding is None:
-            raise HTTPException(status_code=400, detail="Failed to generate face encoding")
+        # Handle backward compatibility: if 'image' is provided, use it as single image
+        all_images = images if images else []
+        if image is not None:
+            all_images = [image] if not images else [image] + images
+        
+        if not all_images:
+            raise HTTPException(status_code=400, detail="No image provided. Please provide either 'image' or 'images' field")
+        
+        # Process each image
+        for i, img in enumerate(all_images):
+            try:
+                # ✅ Validate image file
+                if not img.content_type.startswith("image/"):
+                    errors.append(f"Image {i+1}: File must be an image")
+                    continue
 
-        # ✅ Convert the original image to bytes for DB storage
-        success, encoded_img = cv2.imencode(".jpg", frame)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to encode image")
-        image_data = encoded_img.tobytes()
+                # ✅ Read uploaded image
+                contents = await img.read()
+                nparr = np.frombuffer(contents, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)  # This loads as BGR
+                if frame is None:
+                    errors.append(f"Image {i+1}: Invalid image data")
+                    continue
 
-        # ✅ Save user in database
+                logger.info(f"Processing registration for {name} - Image {i+1} shape: {frame.shape}")
+
+                # ✅ Use FaceEncoder directly for better reliability
+                face_locations, face_encodings, _ = face_encoder.process_frame(frame)
+                if face_encodings:
+                    embedding = face_encodings[0]  # Get the first face's embedding
+                    faces = [{'bbox': loc, 'confidence': 1.0} for loc in face_locations]  # Create faces list with bbox and confidence
+                else:
+                    embedding, faces = None, []
+                    
+                if not faces:
+                    errors.append(f"Image {i+1}: No face detected")
+                    continue
+                    
+                if len(faces) > 1:
+                    errors.append(f"Image {i+1}: Multiple faces detected - using first face")
+
+                # ✅ Use the embedding from process_image (more reliable)
+                if embedding is None:
+                    errors.append(f"Image {i+1}: Failed to generate face encoding")
+                    continue
+
+                # Add embedding to list
+                embeddings.append(embedding)
+                processed_images += 1
+                
+                # Store the first valid image for database storage
+                if first_image_data is None:
+                    success, encoded_img = cv2.imencode(".jpg", frame)
+                    if success:
+                        first_image_data = encoded_img.tobytes()
+                        face_info = faces[0]
+                        detection_confidence = face_info['confidence']
+                    else:
+                        errors.append(f"Image {i+1}: Failed to encode image")
+                        continue
+                        
+            except Exception as e:
+                errors.append(f"Image {i+1}: Processing error - {str(e)}")
+                continue
+        
+        # Validate that we have at least one valid embedding
+        if not embeddings:
+            error_msg = "No valid faces detected in any of the provided images. Please ensure:\n" \
+                      "- The face is clearly visible\n" \
+                      "- Good lighting conditions\n" \
+                      "- Front-facing pose\n" \
+                      "- No extreme angles or occlusions"
+            if errors:
+                error_msg += f"\n\nDetails:\n" + "\n".join(errors)
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        # Calculate average embedding
+        avg_embedding = np.mean(embeddings, axis=0)
+
+        # ✅ Save user in database (using first image data and pre-computed embeddings)
         result = db.add_user(
             name=name,
-            image_data=image_data,
-            is_face_crop=False  # Use full image, not cropped
+            image_data=first_image_data,
+            is_face_crop=False,  # Use full image, not cropped
+            embeddings=embeddings,  # Pass pre-computed embeddings
+            images_processed=processed_images  # Pass number of images processed
         )
 
         if not result or result.get("status") != "success":
             raise HTTPException(status_code=400, detail=result.get("message", "Failed to save user to database"))
 
-        # ✅ Update in-memory recognizer cache
-        face_recognizer.known_face_encodings.append(embedding)
+        # ✅ Update in-memory recognizer cache with averaged embedding
+        face_recognizer.known_face_encodings.append(avg_embedding)
         face_recognizer.known_face_names.append(name)
         face_recognizer.known_face_ids.append(result["id"])
 
         # ✅ Return success response
         return {
             "status": "success",
-            "message": "Face registered successfully",
+            "message": f"Face registered successfully with {processed_images} image(s)",
             "user_id": result["id"],
             "face_confidence": float(detection_confidence),
-            "model": "InsightFace (SCRFD + ArcFace)"
+            "images_processed": processed_images,
+            "model": "InsightFace (SCRFD + ArcFace)",
+            "warnings": errors if errors else None
         }
 
     except HTTPException:

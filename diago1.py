@@ -46,3 +46,20 @@ if torch.cuda.is_available():
         print(f"✅ CUDA {cuda_version} should support RTX 5070")
     else:
         print(f"⚠️  CUDA {cuda_version} might not fully support RTX 5070")
+        
+  
+def check_gpu_status():
+    """Check and display GPU availability for InsightFace."""
+    print("🔍 Checking GPU Status for InsightFace...")
+    print(f"CUDA Available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print(f"CUDA Version: {torch.version.cuda}")
+        print("✅ GPU acceleration enabled for InsightFace!")
+    else:
+        print("❌ No GPU detected - running InsightFace on CPU")
+        print("Note: InsightFace uses ONNX Runtime and will use CPU providers")
+    print(f"PyTorch Version: {torch.__version__}")
+    return torch.cuda.is_available()        
+        

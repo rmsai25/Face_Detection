@@ -26,16 +26,7 @@ logger = logging.getLogger(__name__)
 class FaceRecognizer:
     def __init__(self, face_encoder, registration_mode: bool = False, create_dirs: bool = False, 
                  max_workers: int = 4, batch_size: int = 4):
-        """
-        Initialize FaceRecognizer with parallel processing and GPU optimization.
         
-        Args:
-            face_encoder: Instance of FaceEncoder for encoding & matching
-            registration_mode: True for registration mode, False for recognition mode
-            create_dirs: If True, create directories (default False)
-            max_workers: Number of parallel workers for face detection
-            batch_size: Batch size for parallel processing
-        """
         # 1. DETERMINE DEVICE WITH OPTIMIZATION
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"FaceRecognizer using device: {self.device}")
@@ -500,16 +491,7 @@ class FaceRecognizer:
             return []
 
     def process_frame(self, frame: np.ndarray, db_handler = None) -> Tuple[np.ndarray, List[Dict]]:
-        """
-        Process single frame with optional parallel processing.
         
-        Args:
-            frame: BGR image frame from OpenCV
-            db_handler: Database handler for registration/logging
-
-        Returns:
-            Tuple of (processed_frame, face_data_list)
-        """
         start_time = time.time()
         
         if self.registration_mode:
@@ -523,6 +505,8 @@ class FaceRecognizer:
         """Sequential processing for registration mode."""
         processed_frame = frame.copy()
         face_data = []
+        
+        start_time = time.time()
 
         try:
             detected_faces = self._detect_faces_insightface(frame)
@@ -574,7 +558,7 @@ class FaceRecognizer:
     def _process_frame_parallel(self, frame: np.ndarray, db_handler = None) -> Tuple[np.ndarray, List[Dict]]:
         """Parallel processing for recognition mode."""
         processed_frame = frame.copy()
-        
+        start_time = time.time()
         # For single frame, use immediate processing
         try:
             detected_faces = self._detect_faces_insightface(frame)
@@ -619,15 +603,7 @@ class FaceRecognizer:
             return processed_frame, []
 
     def process_frames_batch(self, frames: List[np.ndarray]) -> List[Tuple[np.ndarray, List[Dict]]]:
-        """
-        Process multiple frames in parallel batches.
         
-        Args:
-            frames: List of frames to process
-            
-        Returns:
-            List of (processed_frame, face_data) tuples
-        """
         if not frames:
             return []
             

@@ -47,15 +47,7 @@ class InsightFaceEmbedder:
             raise
 
     def detect_faces(self, image: np.ndarray) -> List[Dict[str, Any]]:
-        """
-        Detect faces using InsightFace SCRFD with enhanced error handling and logging.
         
-        Args:
-            image: Input image in RGB or BGR format
-            
-        Returns:
-            List of dictionaries containing face detections with bounding boxes, landmarks, and confidence scores
-        """
         try:
             if image is None or image.size == 0:
                 logger.error("Empty or invalid image provided to detect_faces")
@@ -256,15 +248,7 @@ class InsightFaceEmbedder:
             return None, []
 
     def extract_embedding_from_face_crop(self, face_crop: np.ndarray) -> Optional[np.ndarray]:
-        """
-        Extract embedding directly from already cropped face image using InsightFace.
         
-        Args:
-            face_crop: Cropped face image as numpy array (RGB or BGR)
-            
-        Returns:
-            Normalized face embedding vector or None if extraction fails
-        """
         try:
             if face_crop is None or face_crop.size == 0:
                 logger.error("Empty or invalid face crop provided")
@@ -374,16 +358,7 @@ class DatabaseHandler:
             session.close()
 
     def _bytes_to_image(self, image_data: bytes) -> Optional[np.ndarray]:
-        """
-        Convert image bytes to a numpy array in RGB format.
         
-        Args:
-            image_data: Binary image data (JPEG, PNG, etc.)
-            
-        Returns:
-            Numpy array in RGB format with values in [0, 255] and dtype=uint8,
-            or None if conversion fails
-        """
         if not image_data or not isinstance(image_data, (bytes, bytearray)):
             logger.error("Invalid image data: must be non-empty bytes")
             return None
@@ -456,7 +431,7 @@ class DatabaseHandler:
             logger.error(f"Error in _bytes_to_image: {str(e)}", exc_info=True)
             return None
 
-    def add_user(self, name: str, image_data: bytes = None, image_path: str = None, is_face_crop: bool = False) -> Dict[str, Any]:
+    def add_user(self, name: str, image_data: bytes = None, image_path: str = None, is_face_crop: bool = False, embeddings: list = None, images_processed: int = 1) -> Dict[str, Any]:
         """Add a new user with face encoding using InsightFace"""
         session = self.Session()
         try:
@@ -472,43 +447,46 @@ class DatabaseHandler:
             if not image_data or len(image_data) == 0:
                 raise ValueError("Image data cannot be empty")
 
-            # Process image and extract face embedding
-            image = self._bytes_to_image(image_data)
-            if image is None:
-                raise ValueError("Failed to convert image data")
+            # Skip embedding extraction if embeddings are provided
+            if embeddings is not None:
+                logger.info(f"Using pre-computed embeddings from {images_processed} images")
+                avg_embedding = np.mean(embeddings, axis=0)
+                embedding = avg_embedding
+                faces_detected = images_processed
+                primary_face_confidence = 1.0  # Default confidence for averaged embeddings
+            else:
+                # Process image and extract face embedding
+                image = self._bytes_to_image(image_data)
+                if image is None:
+                    raise ValueError("Failed to convert image data")
 
-            # Log image info for debugging
-            logger.info(f"Processing image - Shape: {image.shape}, Type: {image.dtype}, "
-                       f"Min: {image.min()}, Max: {image.max()}")
+                # Log image info for debugging
+                logger.info(f"Processing image - Shape: {image.shape}, Type: {image.dtype}, "
+                           f"Min: {image.min()}, Max: {image.max()}")
 
-            if is_face_crop:
-                logger.info("Processing as pre-cropped face image...")
-                # For already cropped faces, extract embedding directly
-                embedding = self.embedder.extract_embedding_from_face_crop(image)
-                faces_detected = 1 if embedding is not None else 0
-                primary_face_confidence = 1.0 if embedding is not None else 0
-            
-                if embedding is None:
-                    # Try processing as full image as fallback
-                    logger.info("Cropped face processing failed, trying as full image...")
+                if is_face_crop:
+                    logger.info("Processing as pre-cropped face image...")
+                    # For already cropped faces, extract embedding directly
+                    embedding = self.embedder.extract_embedding_from_face_crop(image)
+                    faces_detected = 1 if embedding is not None else 0
+                    primary_face_confidence = 1.0 if embedding is not None else 0
+                
+                    if embedding is None:
+                        # Try processing as full image as fallback
+                        logger.info("Cropped face processing failed, trying as full image...")
+                        embedding, faces = self.embedder.process_image(image)
+                        faces_detected = len(faces) if faces else 0
+                        primary_face_confidence = faces[0]['confidence'] if faces else 0
+                else:
+                    # For full images, detect faces and then extract embedding
+                    logger.info("Detecting faces in full image...")
                     embedding, faces = self.embedder.process_image(image)
                     faces_detected = len(faces) if faces else 0
                     primary_face_confidence = faces[0]['confidence'] if faces else 0
-            else:
-                # For full images, detect faces and then extract embedding
-                logger.info("Detecting faces in full image...")
-                embedding, faces = self.embedder.process_image(image)
-                faces_detected = len(faces) if faces else 0
-                primary_face_confidence = faces[0]['confidence'] if faces else 0
 
             if embedding is None:
                 error_msg = (
-                    "No face detected or embedding extraction failed. Possible reasons:\n"
-                    "1. No face was detected in the image\n"
-                    "2. The face is too small or not clearly visible\n"
-                    "3. The image quality is too low\n"
-                    "4. The face is at an extreme angle or partially occluded\n"
-                    "Please try with a clear, front-facing image of a single face."
+                    "No face detected or embedding extraction failed."
                 )
                 logger.error(f"Error adding user {name}: {error_msg}")
                 raise ValueError(error_msg)
@@ -519,7 +497,7 @@ class DatabaseHandler:
             # Convert to list for database storage
             encoding_list = embedding.tolist()
         
-            # Create and save user
+            # Create and save user (use first image_data for storage)
             user = User(
                 name=name.strip(),
                 face_encoding=encoding_list,
@@ -532,7 +510,7 @@ class DatabaseHandler:
             # Refresh to get the ID
             session.refresh(user)
         
-            logger.info(f"Successfully registered user: {name} with ID: {user.id}")
+            logger.info(f"Successfully registered user: {name} with ID: {user.id} (from {faces_detected} images)")
         
             return {
                 'id': user.id,

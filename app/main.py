@@ -21,16 +21,13 @@ from .face_processing.recognition import FaceRecognizer
 from .face_processing.capture import VideoCapture
 from .utils.logger import setup_logger
 
-# ==============================
 # Logging and Environment Setup
-# ==============================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-# ==============================
+
 # FastAPI Application Setup
-# ==============================
 app = FastAPI(
     title="Face Recognition API",
     description="API for face recognition and registration using InsightFace + SCRFD",
@@ -60,7 +57,7 @@ templates = Jinja2Templates(directory="app/templates")
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": exc.errors(), "body": exc.body},
+        content={"detail": exc.errors(), "body": str(exc.body) if exc.body else None},
     )
 
 @app.exception_handler(500)
@@ -85,9 +82,6 @@ async def health_check():
         "gpu_available": torch.cuda.is_available()
     }
 
-# ==============================
-# GPU Check Utility
-# ==============================
 def check_gpu_status():
     """Check and display GPU availability for InsightFace."""
     print("🔍 Checking GPU Status for InsightFace...")
@@ -103,9 +97,8 @@ def check_gpu_status():
     print(f"PyTorch Version: {torch.__version__}")
     return torch.cuda.is_available()
 
-# ==============================
+
 # Face Detection System
-# ==============================
 class FaceDetectionSystem:
     def __init__(self, registration_mode=False):
         self.logger = setup_logger(
@@ -217,25 +210,18 @@ class FaceDetectionSystem:
         except Exception as e:
             self.logger.error(f"Cleanup error: {e}")
 
-# ==============================
+
 # Model Information
-# ==============================
+
 def print_model_info():
     """Print information about the face recognition model."""
     print("\n" + "="*50)
     print("🤖 FACE RECOGNITION SYSTEM - MODEL INFORMATION")
     print("="*50)
     print("Model: InsightFace")
-    print("Detector: SCRFD (State-of-the-art face detection)")
-    print("Recognizer: ArcFace (High-accuracy face recognition)")
-    print("Embedding Dimension: 512D")
-    print("Default Model: buffalo_l")
     print("="*50)
     print()
 
-# ==============================
-# Main Entry Point
-# ==============================
 def main():
     parser = argparse.ArgumentParser(description="Face Recognition System using InsightFace + SCRFD")
     parser.add_argument("--mode", choices=["server", "realtime"], default="server",

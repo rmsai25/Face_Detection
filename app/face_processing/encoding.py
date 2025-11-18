@@ -14,16 +14,7 @@ logger = logging.getLogger(__name__)
 
 def find_cosine_distance(source_representation: Union[np.ndarray, List], 
                         test_representation: Union[np.ndarray, List]) -> np.ndarray:
-    """
-    Calculate cosine distance between two vectors.
     
-    Args:
-        source_representation: Source vector or list of vectors
-        test_representation: Test vector or list of vectors
-        
-    Returns:
-        Cosine distances
-    """
     # Convert to numpy arrays
     if isinstance(source_representation, list):
         source_representation = np.array(source_representation, dtype=np.float32)
@@ -53,16 +44,7 @@ def find_cosine_distance(source_representation: Union[np.ndarray, List],
 
 def cosine_similarity(source_representation: Union[np.ndarray, List], 
                      test_representation: Union[np.ndarray, List]) -> np.ndarray:
-    """
-    Calculate cosine similarity between two vectors.
     
-    Args:
-        source_representation: Source vector or list of vectors
-        test_representation: Test vector or list of vectors
-        
-    Returns:
-        Cosine similarities (0 to 1)
-    """
     cosine_dist = find_cosine_distance(source_representation, test_representation)
     return 1.0 - cosine_dist
 
@@ -79,13 +61,7 @@ class FaceEncoder:
     }
     
     def __init__(self, device: str = 'auto', distance_metric: str = 'cosine'):
-        """
-        Initialize FaceEncoder with InsightFace (SCRFD + ArcFace).
         
-        Args:
-            device: 'auto', 'cuda', or 'cpu'
-            distance_metric: 'cosine' or 'euclidean'
-        """
         if device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
@@ -430,16 +406,7 @@ class FaceEncoder:
 
     def verify_faces(self, source_image: Union[str, np.ndarray], 
                     target_image: Union[str, np.ndarray]) -> Dict[str, Any]:
-        """
-        Verify if two images contain the same face using InsightFace.
         
-        Args:
-            source_image: Source image path or array
-            target_image: Target image path or array
-            
-        Returns:
-            Verification results dictionary
-        """
         try:
             # Encode source face
             if isinstance(source_image, np.ndarray):
@@ -511,18 +478,7 @@ class FaceEncoder:
                        known_encodings: List[Union[np.ndarray, List]], 
                        known_names: List[str], 
                        threshold: Optional[float] = None) -> Tuple[Optional[str], float, bool]:
-        """
-        Find the best match for a face encoding from known encodings.
         
-        Args:
-            target_encoding: Target face encoding
-            known_encodings: List of known face encodings
-            known_names: List of names corresponding to known_encodings
-            threshold: Optional custom threshold
-            
-        Returns:
-            Tuple of (best_match_name, confidence, is_verified)
-        """
         if threshold is None:
             threshold = self.recognition_threshold
 
@@ -604,15 +560,7 @@ class FaceEncoder:
             return None, 0.0, False
 
     def process_frame(self, frame: np.ndarray) -> Tuple[List, List, np.ndarray]:
-        """
-        Detect and encode faces from a BGR frame using InsightFace.
         
-        Args:
-            frame: BGR image from OpenCV
-            
-        Returns:
-            Tuple of (valid_face_locations, face_encodings, rgb_frame)
-        """
         try:
             # Convert to RGB for compatibility with existing code
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -630,12 +578,7 @@ class FaceEncoder:
             return [], [], frame
 
     def set_threshold(self, threshold: float):
-        """
-        Set recognition threshold.
         
-        Args:
-            threshold: New threshold value
-        """
         if threshold < 0:
             raise ValueError("Threshold must be non-negative")
             
@@ -644,12 +587,7 @@ class FaceEncoder:
         logger.info(f"Threshold changed from {old_threshold} to {threshold}")
 
     def get_model_info(self) -> Dict[str, Any]:
-        """
-        Get model information.
         
-        Returns:
-            Dictionary with model info
-        """
         return {
             'face_detector': 'SCRFD (via InsightFace)',
             'face_recognizer': 'ArcFace (via InsightFace)',
@@ -660,27 +598,3 @@ class FaceEncoder:
             'model_name': 'buffalo_l'
         }
 
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Set up logging
-    logging.basicConfig(level=logging.INFO)
-    
-    # Test the face encoder
-    encoder = FaceEncoder()
-    
-    # Test with sample images
-    test_image1 = "path/to/test1.jpg"  # Replace with actual path
-    test_image2 = "path/to/test2.jpg"  # Replace with actual path
-    
-    if os.path.exists(test_image1) and os.path.exists(test_image2):
-        # Test verification
-        result = encoder.verify_faces(test_image1, test_image2)
-        print("Verification result:", result)
-        
-        # Test single encoding
-        encoding = encoder.encode_face(image_path=test_image1)
-        if encoding is not None:
-            print(f"Encoding shape: {encoding.shape}, norm: {np.linalg.norm(encoding):.4f}")
-    else:
-        print("Test images not found, please update paths")

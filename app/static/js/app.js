@@ -27,6 +27,9 @@ let currentCameraId = null;
 let recognizeLoop = null;
 let isRecognizing = false;
 
+let capturedImages = []; // store multiple photos for registration
+
+
 // --- Core Logic ---
 
 // Event Listeners
@@ -220,11 +223,22 @@ function captureImage() {
     }, 200);
     //The image is converted to a base64-encoded JPEG string using canvas.toDataURL('image/jpeg', 0.9)
    //The JPEG quality is set to 0.9 (90% quality)
-    return canvas.toDataURL('image/jpeg', 0.9);
+    const imageData = canvas.toDataURL('image/jpeg', 0.9);
+
+    //store image in array(max 2)
+    if (capturedImages.length < 2) {
+        capturedImages.push(imageData);
+        showAlert('success', `Image ${capturedImages.length} captured`, registerStatus);
+    } else {
+        showAlert('warning', 'Already captured 2 images', registerStatus);
+    }
+
+    return imageData;
 }
 
+
 // Handle face registration
-async function handleRegistration(e) {
+/*async function handleRegistration(e) {
     e.preventDefault();
     
     const name = document.getElementById('name').value.trim();
@@ -245,7 +259,7 @@ async function handleRegistration(e) {
     
     // Convert base64 to blob
     const blob = await (await fetch(imageData)).blob();
-    formData.append('image', blob, 'face.jpg');
+    formData.append('images', blob, 'face.jpg');
     
     // Disable button and show loading
     const originalText = registerBtn.innerHTML;
@@ -274,7 +288,61 @@ async function handleRegistration(e) {
         registerBtn.disabled = false;
         registerBtn.innerHTML = originalText;
     }
+}*/
+
+async function handleRegistration(e) {
+    e.preventDefault();
+
+    const name = document.getElementById('name').value.trim();
+    if (!name) {
+        showAlert('error', 'Please enter a name', registerStatus);
+        return;
+    }
+
+    // 👉 Ensure at least 2 photos are captured
+    if (capturedImages.length < 2) {
+        showAlert('error', 'Please capture at least 2 photos', registerStatus);
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('name', name);
+
+    // 👉 Convert each base64 photo to Blob & send under "images"
+    for (let i = 0; i < capturedImages.length; i++) {
+        const blob = await (await fetch(capturedImages[i])).blob();
+        formData.append('images', blob, `face_${i + 1}.jpg`);
+    }
+
+    // Disable register button
+    const originalText = registerBtn.innerHTML;
+    registerBtn.disabled = true;
+    registerBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Registering...';
+
+    try {
+        const response = await fetch('/api/register', {
+            method: 'POST',
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            showAlert('success', 'Face registered successfully!', registerStatus);
+            capturedImages = []; // reset
+            document.getElementById('name').value = '';
+            loadLogs();
+        } else {
+            throw new Error(result.detail || 'Registration failed');
+        }
+    } catch (error) {
+        showAlert('error', error.message, registerStatus);
+    } finally {
+        registerBtn.disabled = false;
+        registerBtn.innerHTML = originalText;
+    }
 }
+
 
 // Recognize face
 async function recognizeFace() {
